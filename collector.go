@@ -58,7 +58,7 @@ func (c *Collector) flushLocked() {
 	events := c.events
 	c.events = make([]*Event, 0, c.batchSize)
 
-	// Send asynchronously to avoid blocking
+// Send asynchronously to avoid blocking
 	go c.transport.Send(events)
 }
 
