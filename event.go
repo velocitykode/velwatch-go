@@ -7,11 +7,14 @@ import (
 
 // Event types
 const (
-	EventTypeRequest   = "request"
-	EventTypeQuery     = "query"
-	EventTypeCache     = "cache"
-	EventTypeException = "exception"
-	EventTypeJob       = "job"
+	EventTypeRequest         = "request"
+	EventTypeQuery           = "query"
+	EventTypeCache           = "cache"
+	EventTypeException       = "exception"
+	EventTypeJob             = "job"
+	EventTypeOutgoingRequest = "outgoing_request"
+	EventTypeMail            = "mail"
+	EventTypeScheduledTask   = "scheduled_task"
 )
 
 // Event represents a single instrumentation event
@@ -79,6 +82,36 @@ func NewJobEvent(jobType, queueName, status string, durationMs float64) *Event {
 	e := NewEvent(EventTypeJob)
 	e.Attributes["job_type"] = jobType
 	e.Attributes["queue"] = queueName
+	e.Attributes["status"] = status
+	e.Attributes["duration_ms"] = durationMs
+	return e
+}
+
+// NewOutgoingRequestEvent creates a new outgoing HTTP request event
+func NewOutgoingRequestEvent(method, url string, statusCode int, durationMs float64) *Event {
+	e := NewEvent(EventTypeOutgoingRequest)
+	e.Attributes["method"] = method
+	e.Attributes["url"] = url
+	e.Attributes["status"] = statusCode
+	e.Attributes["duration_ms"] = durationMs
+	return e
+}
+
+// NewMailEvent creates a new mail event
+func NewMailEvent(subject string, recipientCount int, channel, status string, durationMs float64) *Event {
+	e := NewEvent(EventTypeMail)
+	e.Attributes["subject"] = subject
+	e.Attributes["recipient_count"] = recipientCount
+	e.Attributes["channel"] = channel
+	e.Attributes["status"] = status
+	e.Attributes["duration_ms"] = durationMs
+	return e
+}
+
+// NewScheduledTaskEvent creates a new scheduled task event
+func NewScheduledTaskEvent(taskName, status string, durationMs float64) *Event {
+	e := NewEvent(EventTypeScheduledTask)
+	e.Attributes["task_name"] = taskName
 	e.Attributes["status"] = status
 	e.Attributes["duration_ms"] = durationMs
 	return e

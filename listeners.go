@@ -7,9 +7,12 @@ import (
 
 	"github.com/velocitykode/velocity/pkg/cache"
 	"github.com/velocitykode/velocity/pkg/events"
+	"github.com/velocitykode/velocity/pkg/httpclient"
+	"github.com/velocitykode/velocity/pkg/mail"
 	"github.com/velocitykode/velocity/pkg/orm"
 	"github.com/velocitykode/velocity/pkg/queue"
 	"github.com/velocitykode/velocity/pkg/router"
+	"github.com/velocitykode/velocity/pkg/scheduler"
 )
 
 // Listeners manages event listeners for Velocity framework events
@@ -51,6 +54,19 @@ func (l *Listeners) Register() {
 	l.registerTypedListener("job.processing", events.OnEvent(l.onJobProcessing))
 	l.registerTypedListener("job.processed", events.OnEvent(l.onJobProcessed))
 	l.registerTypedListener("job.failed", events.OnEvent(l.onJobFailed))
+
+	// HTTP client events
+	l.registerTypedListener("http.request.sent", events.OnEvent(l.onHTTPRequestSent))
+	l.registerTypedListener("http.request.failed", events.OnEvent(l.onHTTPRequestFailed))
+
+	// Mail events
+	l.registerTypedListener("mail.sent", events.OnEvent(l.onMailSent))
+	l.registerTypedListener("mail.failed", events.OnEvent(l.onMailFailed))
+
+	// Scheduler events
+	l.registerTypedListener("scheduled.starting", events.OnEvent(l.onScheduledTaskStarting))
+	l.registerTypedListener("scheduled.finished", events.OnEvent(l.onScheduledTaskFinished))
+	l.registerTypedListener("scheduled.failed", events.OnEvent(l.onScheduledTaskFailed))
 }
 
 // Unregister removes all registered event listeners
@@ -360,6 +376,190 @@ func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
 	}
 
 	event := NewJobEvent(e.JobType, e.Queue, "failed", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["error"] = e.Error
+
+	l.collector.Add(event)
+	return nil
+}
+
+// HTTP Client Handlers
+
+func (l *Listeners) onHTTPRequestSent(e *httpclient.RequestSent) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		return nil // Only record requests within a trace
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewOutgoingRequestEvent(e.Method, e.URL, e.StatusCode, float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["request_size"] = e.RequestSize
+	event.Attributes["response_size"] = e.ResponseSize
+
+	l.collector.Add(event)
+	return nil
+}
+
+func (l *Listeners) onHTTPRequestFailed(e *httpclient.RequestFailed) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		return nil // Only record requests within a trace
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewOutgoingRequestEvent(e.Method, e.URL, 0, float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["error"] = e.Error
+
+	l.collector.Add(event)
+	return nil
+}
+
+// Mail Handlers
+
+func (l *Listeners) onMailSent(e *mail.MailSent) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewMailEvent(e.Subject, len(e.To), e.Channel, "sent", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+
+	l.collector.Add(event)
+	return nil
+}
+
+func (l *Listeners) onMailFailed(e *mail.MailFailed) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewMailEvent(e.Subject, len(e.To), e.Channel, "failed", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["error"] = e.Error
+
+	l.collector.Add(event)
+	return nil
+}
+
+// Scheduler Handlers
+
+func (l *Listeners) onScheduledTaskStarting(e *scheduler.ScheduledTaskStarting) error {
+	// We don't record starting events - wait for finished/failed
+	return nil
+}
+
+func (l *Listeners) onScheduledTaskFinished(e *scheduler.ScheduledTaskFinished) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewScheduledTaskEvent(e.TaskName, "finished", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+
+	l.collector.Add(event)
+	return nil
+}
+
+func (l *Listeners) onScheduledTaskFailed(e *scheduler.ScheduledTaskFailed) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewScheduledTaskEvent(e.TaskName, "failed", float64(e.DurationMs))
 	event.TraceID = traceID
 	event.SpanID = spanID
 	if parentID != "" {
