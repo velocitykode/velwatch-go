@@ -2,67 +2,45 @@ package velwatch
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-)
 
-// Context keys for trace propagation
-type contextKey string
-
-const (
-	traceIDKey  contextKey = "velwatch_trace_id"
-	spanIDKey   contextKey = "velwatch_span_id"
-	parentIDKey contextKey = "velwatch_parent_id"
+	"github.com/velocitykode/velocity/pkg/trace"
 )
 
 // WithTraceContext adds trace context to a context
+// Delegates to Velocity's trace package for compatibility with ORM events
 func WithTraceContext(ctx context.Context, traceID, spanID string) context.Context {
-	ctx = context.WithValue(ctx, traceIDKey, traceID)
-	ctx = context.WithValue(ctx, spanIDKey, spanID)
-	return ctx
+	return trace.WithTrace(ctx, traceID, spanID)
 }
 
-// WithParentSpan adds parent span ID to a context
+// WithParentSpan adds parent span ID to a context by creating a new span
+// The current span becomes the parent
 func WithParentSpan(ctx context.Context, parentID string) context.Context {
-	return context.WithValue(ctx, parentIDKey, parentID)
+	return trace.WithSpan(ctx, parentID)
 }
 
 // GetTraceID retrieves the trace ID from context
 func GetTraceID(ctx context.Context) string {
-	if v := ctx.Value(traceIDKey); v != nil {
-		return v.(string)
-	}
-	return ""
+	return trace.GetTraceID(ctx)
 }
 
 // GetSpanID retrieves the span ID from context
 func GetSpanID(ctx context.Context) string {
-	if v := ctx.Value(spanIDKey); v != nil {
-		return v.(string)
-	}
-	return ""
+	return trace.GetSpanID(ctx)
 }
 
 // GetParentID retrieves the parent span ID from context
 func GetParentID(ctx context.Context) string {
-	if v := ctx.Value(parentIDKey); v != nil {
-		return v.(string)
-	}
-	return ""
+	return trace.GetParentID(ctx)
 }
 
 // GenerateTraceID generates a new random trace ID (32 hex chars)
 func GenerateTraceID() string {
-	bytes := make([]byte, 16)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	return trace.GenerateTraceID()
 }
 
 // GenerateSpanID generates a new random span ID (16 hex chars)
 func GenerateSpanID() string {
-	bytes := make([]byte, 8)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	return trace.GenerateSpanID()
 }
 
 // StartSpan creates a new span within the current trace
@@ -142,14 +120,11 @@ func ContextFromTraceHeader(ctx context.Context, th *TraceHeader) context.Contex
 	if th == nil {
 		return ctx
 	}
+	// Set trace ID and incoming span as the initial span
 	if th.TraceID != "" {
-		ctx = context.WithValue(ctx, traceIDKey, th.TraceID)
+		ctx = trace.WithTrace(ctx, th.TraceID, th.SpanID)
 	}
-	if th.SpanID != "" {
-		// The incoming span becomes our parent
-		ctx = context.WithValue(ctx, parentIDKey, th.SpanID)
-	}
-	// Generate new span ID for this request
-	ctx = context.WithValue(ctx, spanIDKey, GenerateSpanID())
+	// Create new span for this request (incoming span becomes parent)
+	ctx, _ = trace.WithNewSpan(ctx)
 	return ctx
 }

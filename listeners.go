@@ -2,6 +2,7 @@ package velwatch
 
 import (
 	"context"
+	"log"
 	"math/rand"
 	"time"
 
@@ -37,36 +38,125 @@ func NewListeners(collector *Collector, serviceName string, sampleRate float64) 
 
 // Register registers all Velocity event listeners
 func (l *Listeners) Register() {
-	// HTTP request events
-	l.registerTypedListener("request.handled", events.OnEvent(l.onRequestHandled))
-	l.registerTypedListener("request.failed", events.OnEvent(l.onRequestFailed))
+	log.Printf("[VELWATCH] Registering event listeners...")
+
+	// HTTP request events - use raw listeners due to OnEvent wrapper issue
+	l.registerRawListener("request.handled", func(e interface{}) error {
+		if r, ok := e.(*router.RequestHandled); ok {
+			return l.onRequestHandled(r)
+		}
+		return nil
+	})
+	l.registerRawListener("request.failed", func(e interface{}) error {
+		log.Printf("[VELWATCH] request.failed raw listener called, type=%T", e)
+		if r, ok := e.(*router.RequestFailed); ok {
+			return l.onRequestFailed(r)
+		}
+		log.Printf("[VELWATCH] request.failed type assertion failed")
+		return nil
+	})
 
 	// Database query events
-	l.registerTypedListener("query.executed", events.OnEvent(l.onQueryExecuted))
+	l.registerRawListener("query.executed", func(e interface{}) error {
+		if q, ok := e.(*orm.QueryExecuted); ok {
+			return l.onQueryExecuted(q)
+		}
+		return nil
+	})
 
-	// Cache events
-	l.registerTypedListener("cache.hit", events.OnEvent(l.onCacheHit))
-	l.registerTypedListener("cache.miss", events.OnEvent(l.onCacheMiss))
-	l.registerTypedListener("cache.written", events.OnEvent(l.onCacheWritten))
+	// Cache events - use raw listeners due to OnEvent wrapper issue
+	l.registerRawListener("cache.hit", func(e interface{}) error {
+		if c, ok := e.(*cache.CacheHit); ok {
+			return l.onCacheHit(c)
+		}
+		return nil
+	})
+	l.registerRawListener("cache.miss", func(e interface{}) error {
+		if c, ok := e.(*cache.CacheMiss); ok {
+			return l.onCacheMiss(c)
+		}
+		return nil
+	})
+	l.registerRawListener("cache.written", func(e interface{}) error {
+		if c, ok := e.(*cache.CacheWritten); ok {
+			return l.onCacheWritten(c)
+		}
+		return nil
+	})
 
 	// Queue job events
-	l.registerTypedListener("job.queued", events.OnEvent(l.onJobQueued))
-	l.registerTypedListener("job.processing", events.OnEvent(l.onJobProcessing))
-	l.registerTypedListener("job.processed", events.OnEvent(l.onJobProcessed))
-	l.registerTypedListener("job.failed", events.OnEvent(l.onJobFailed))
+	l.registerRawListener("job.queued", func(e interface{}) error {
+		if j, ok := e.(*queue.JobQueued); ok {
+			return l.onJobQueued(j)
+		}
+		return nil
+	})
+	l.registerRawListener("job.processing", func(e interface{}) error {
+		if j, ok := e.(*queue.JobProcessing); ok {
+			return l.onJobProcessing(j)
+		}
+		return nil
+	})
+	l.registerRawListener("job.processed", func(e interface{}) error {
+		if j, ok := e.(*queue.JobProcessed); ok {
+			return l.onJobProcessed(j)
+		}
+		return nil
+	})
+	l.registerRawListener("job.failed", func(e interface{}) error {
+		if j, ok := e.(*queue.JobFailed); ok {
+			return l.onJobFailed(j)
+		}
+		return nil
+	})
 
 	// HTTP client events
-	l.registerTypedListener("http.request.sent", events.OnEvent(l.onHTTPRequestSent))
-	l.registerTypedListener("http.request.failed", events.OnEvent(l.onHTTPRequestFailed))
+	l.registerRawListener("http.request.sent", func(e interface{}) error {
+		if r, ok := e.(*httpclient.RequestSent); ok {
+			return l.onHTTPRequestSent(r)
+		}
+		return nil
+	})
+	l.registerRawListener("http.request.failed", func(e interface{}) error {
+		if r, ok := e.(*httpclient.RequestFailed); ok {
+			return l.onHTTPRequestFailed(r)
+		}
+		return nil
+	})
 
 	// Mail events
-	l.registerTypedListener("mail.sent", events.OnEvent(l.onMailSent))
-	l.registerTypedListener("mail.failed", events.OnEvent(l.onMailFailed))
+	l.registerRawListener("mail.sent", func(e interface{}) error {
+		if m, ok := e.(*mail.MailSent); ok {
+			return l.onMailSent(m)
+		}
+		return nil
+	})
+	l.registerRawListener("mail.failed", func(e interface{}) error {
+		if m, ok := e.(*mail.MailFailed); ok {
+			return l.onMailFailed(m)
+		}
+		return nil
+	})
 
 	// Scheduler events
-	l.registerTypedListener("scheduled.starting", events.OnEvent(l.onScheduledTaskStarting))
-	l.registerTypedListener("scheduled.finished", events.OnEvent(l.onScheduledTaskFinished))
-	l.registerTypedListener("scheduled.failed", events.OnEvent(l.onScheduledTaskFailed))
+	l.registerRawListener("scheduled.starting", func(e interface{}) error {
+		if s, ok := e.(*scheduler.ScheduledTaskStarting); ok {
+			return l.onScheduledTaskStarting(s)
+		}
+		return nil
+	})
+	l.registerRawListener("scheduled.finished", func(e interface{}) error {
+		if s, ok := e.(*scheduler.ScheduledTaskFinished); ok {
+			return l.onScheduledTaskFinished(s)
+		}
+		return nil
+	})
+	l.registerRawListener("scheduled.failed", func(e interface{}) error {
+		if s, ok := e.(*scheduler.ScheduledTaskFailed); ok {
+			return l.onScheduledTaskFailed(s)
+		}
+		return nil
+	})
 }
 
 // Unregister removes all registered event listeners
@@ -78,6 +168,12 @@ func (l *Listeners) Unregister() {
 }
 
 func (l *Listeners) registerTypedListener(eventName string, handler func(event interface{}) error) {
+	events.On(eventName, handler)
+	l.eventNames = append(l.eventNames, eventName)
+}
+
+// registerRawListener registers a raw event listener without the OnEvent wrapper
+func (l *Listeners) registerRawListener(eventName string, handler func(event interface{}) error) {
 	events.On(eventName, handler)
 	l.eventNames = append(l.eventNames, eventName)
 }
@@ -122,6 +218,8 @@ func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
 }
 
 func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
+	log.Printf("[VELWATCH] onRequestFailed called: path=%s, error=%v, recovered=%v", e.Path, e.Error, e.Recovered)
+
 	if !l.shouldSample() {
 		return nil
 	}
@@ -174,14 +272,18 @@ func (l *Listeners) onQueryExecuted(e *orm.QueryExecuted) error {
 		return nil
 	}
 
-	// Extract trace context from the query context
-	traceID := GetTraceID(e.Context)
-	spanID := GetSpanID(e.Context)
-	parentID := GetParentID(e.Context)
+	// Extract trace context from the event (populated by Velocity)
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
 
-	// Only record queries that are part of a trace
+	// Generate trace IDs if not present (for queries outside request context)
+	// This captures queries from model methods that don't pass context
 	if traceID == "" {
-		return nil
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
 	}
 
 	event := NewQueryEvent(
@@ -195,6 +297,10 @@ func (l *Listeners) onQueryExecuted(e *orm.QueryExecuted) error {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
+	event.Tags["orphan"] = "true" // Mark as orphan if no parent trace
+	if e.TraceID != "" {
+		delete(event.Tags, "orphan")
+	}
 	event.Attributes["connection"] = e.Connection
 	event.Attributes["file"] = e.File
 	event.Attributes["line"] = e.Line
@@ -210,10 +316,10 @@ func (l *Listeners) onCacheHit(e *cache.CacheHit) error {
 		return nil
 	}
 
-	// Extract trace context from the cache context
-	traceID := GetTraceID(e.Context)
-	spanID := GetSpanID(e.Context)
-	parentID := GetParentID(e.Context)
+	// Extract trace context from the event (populated by Velocity)
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
 
 	if traceID == "" {
 		return nil
@@ -237,10 +343,10 @@ func (l *Listeners) onCacheMiss(e *cache.CacheMiss) error {
 		return nil
 	}
 
-	// Extract trace context from the cache context
-	traceID := GetTraceID(e.Context)
-	spanID := GetSpanID(e.Context)
-	parentID := GetParentID(e.Context)
+	// Extract trace context from the event (populated by Velocity)
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
 
 	if traceID == "" {
 		return nil
@@ -264,10 +370,10 @@ func (l *Listeners) onCacheWritten(e *cache.CacheWritten) error {
 		return nil
 	}
 
-	// Extract trace context from the cache context
-	traceID := GetTraceID(e.Context)
-	spanID := GetSpanID(e.Context)
-	parentID := GetParentID(e.Context)
+	// Extract trace context from the event (populated by Velocity)
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
 
 	if traceID == "" {
 		return nil
