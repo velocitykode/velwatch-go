@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package velwatch.events.v1;
+
+option go_package = "github.com/velocitykode/velwatch-go/proto/events/v1;eventsv1";
+
+// EventService handles APM event ingestion
+service EventService {
+  // Ingest accepts a batch of events
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+  // IngestStream accepts a stream of events with per-event acknowledgments
+  rpc IngestStream(stream Event) returns (stream Ack);
+}
+
+// Event represents a single APM event (request, query, cache, exception)
+message Event {
+  // Type of event: request, query, cache, exception
+  string type = 1;
+  // Timestamp in milliseconds since Unix epoch
+  int64 timestamp_ms = 2;
+  // Trace ID for distributed tracing correlation
+  string trace_id = 3;
+  // Span ID for this specific event
+  string span_id = 4;
+  // Parent span ID (optional, for nested spans)
+  optional string parent_id = 5;
+  // JSON blob containing event-specific attributes (max 32KB)
+  string attributes_json = 6;
+  // Key-value tags for filtering (max 20 tags)
+  map<string, string> tags = 7;
+}
+
+// IngestRequest contains a batch of events to ingest
+message IngestRequest {
+  // Events to ingest (max 500 per batch)
+  repeated Event events = 1;
+}
+
+// IngestResponse contains the result of a batch ingestion
+message IngestResponse {
+  // Whether the overall operation succeeded
+  bool success = 1;
+  // Number of events accepted
+  int32 accepted = 2;
+  // Number of events rejected
+  int32 rejected = 3;
+  // Errors for rejected events
+  repeated EventError errors = 4;
+}
+
+// Ack acknowledges a single streamed event
+message Ack {
+  // Span ID of the acknowledged event
+  string span_id = 1;
+  // Whether the event was accepted
+  bool accepted = 2;
+  // Error message if rejected
+  optional string error = 3;
+}
+
+// EventError describes an error for a specific event in a batch
+message EventError {
+  // Index of the event in the batch (0-based)
+  int32 index = 1;
+  // Error code (e.g., "INVALID_TYPE", "PAYLOAD_TOO_LARGE")
+  string code = 2;
+  // Human-readable error message
+  string message = 3;
+}
