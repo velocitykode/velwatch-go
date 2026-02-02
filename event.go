@@ -11,6 +11,7 @@ const (
 	EventTypeQuery     = "query"
 	EventTypeCache     = "cache"
 	EventTypeException = "exception"
+	EventTypeJob       = "job"
 )
 
 // Event represents a single instrumentation event
@@ -70,6 +71,16 @@ func NewExceptionEvent(errType, message, stackTrace string) *Event {
 	e.Attributes["type"] = errType
 	e.Attributes["message"] = message
 	e.Attributes["stack_trace"] = stackTrace
+	return e
+}
+
+// NewJobEvent creates a new queue job event
+func NewJobEvent(jobType, queueName, status string, durationMs float64) *Event {
+	e := NewEvent(EventTypeJob)
+	e.Attributes["job_type"] = jobType
+	e.Attributes["queue"] = queueName
+	e.Attributes["status"] = status
+	e.Attributes["duration_ms"] = durationMs
 	return e
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/velocitykode/velocity/pkg/cache"
 	"github.com/velocitykode/velocity/pkg/events"
 	"github.com/velocitykode/velocity/pkg/orm"
+	"github.com/velocitykode/velocity/pkg/queue"
 	"github.com/velocitykode/velocity/pkg/router"
 )
 
@@ -44,6 +45,12 @@ func (l *Listeners) Register() {
 	l.registerTypedListener("cache.hit", events.OnEvent(l.onCacheHit))
 	l.registerTypedListener("cache.miss", events.OnEvent(l.onCacheMiss))
 	l.registerTypedListener("cache.written", events.OnEvent(l.onCacheWritten))
+
+	// Queue job events
+	l.registerTypedListener("job.queued", events.OnEvent(l.onJobQueued))
+	l.registerTypedListener("job.processing", events.OnEvent(l.onJobProcessing))
+	l.registerTypedListener("job.processed", events.OnEvent(l.onJobProcessed))
+	l.registerTypedListener("job.failed", events.OnEvent(l.onJobFailed))
 }
 
 // Unregister removes all registered event listeners
@@ -259,6 +266,107 @@ func (l *Listeners) onCacheWritten(e *cache.CacheWritten) error {
 	event.Tags["service"] = l.serviceName
 	event.Attributes["store"] = e.Store
 	event.Attributes["ttl_seconds"] = e.TTL.Seconds()
+
+	l.collector.Add(event)
+	return nil
+}
+
+// Queue Job Handlers
+
+func (l *Listeners) onJobQueued(e *queue.JobQueued) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	// Extract trace context
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	// Job queued events may not have trace context if queued outside a request
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewJobEvent(e.JobType, e.Queue, "queued", 0)
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["delayed"] = e.Delayed
+	if e.Delayed {
+		event.Attributes["delay_ms"] = e.DelayMs
+	}
+
+	l.collector.Add(event)
+	return nil
+}
+
+func (l *Listeners) onJobProcessing(e *queue.JobProcessing) error {
+	// We don't record job.processing as a separate event
+	// The job.processed or job.failed event will capture the full duration
+	return nil
+}
+
+func (l *Listeners) onJobProcessed(e *queue.JobProcessed) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	// Extract trace context
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewJobEvent(e.JobType, e.Queue, "processed", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+
+	l.collector.Add(event)
+	return nil
+}
+
+func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
+	if !l.shouldSample() {
+		return nil
+	}
+
+	// Extract trace context
+	traceID := e.TraceID
+	spanID := e.SpanID
+	parentID := e.ParentID
+
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if spanID == "" {
+		spanID = GenerateSpanID()
+	}
+
+	event := NewJobEvent(e.JobType, e.Queue, "failed", float64(e.DurationMs))
+	event.TraceID = traceID
+	event.SpanID = spanID
+	if parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["error"] = e.Error
 
 	l.collector.Add(event)
 	return nil
