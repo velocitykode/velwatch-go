@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/velocitykode/velocity/pkg/queue"
+	"github.com/velocitykode/velocity/events"
+	"github.com/velocitykode/velocity/queue"
+	"github.com/velocitykode/velocity/router"
 )
 
 // testCollector creates a collector for testing that won't flush automatically
@@ -35,7 +37,7 @@ func clearEvents(c *Collector) {
 
 func TestOnJobQueued(t *testing.T) {
 	collector := testCollector()
-	listeners := NewListeners(collector, "test-service", 1.0)
+	listeners := NewListeners(collector, events.NewDispatcher(), "test-service", 1.0)
 
 	t.Run("records job queued event", func(t *testing.T) {
 		clearEvents(collector)
@@ -154,7 +156,7 @@ func TestOnJobQueued(t *testing.T) {
 	t.Run("respects sample rate", func(t *testing.T) {
 		clearEvents(collector)
 		// Create listener with 0% sample rate
-		zeroSampleListeners := NewListeners(nil, "test-service", 0.0)
+		zeroSampleListeners := NewListeners(nil, events.NewDispatcher(), "test-service", 0.0)
 		zeroSampleListeners.collector = collector
 
 		e := &queue.JobQueued{
@@ -178,7 +180,7 @@ func TestOnJobQueued(t *testing.T) {
 
 func TestOnJobProcessing(t *testing.T) {
 	collector := testCollector()
-	listeners := NewListeners(collector, "test-service", 1.0)
+	listeners := NewListeners(collector, events.NewDispatcher(), "test-service", 1.0)
 
 	t.Run("does not record processing event", func(t *testing.T) {
 		clearEvents(collector)
@@ -206,7 +208,7 @@ func TestOnJobProcessing(t *testing.T) {
 
 func TestOnJobProcessed(t *testing.T) {
 	collector := testCollector()
-	listeners := NewListeners(collector, "test-service", 1.0)
+	listeners := NewListeners(collector, events.NewDispatcher(), "test-service", 1.0)
 
 	t.Run("records job processed event", func(t *testing.T) {
 		clearEvents(collector)
@@ -272,7 +274,7 @@ func TestOnJobProcessed(t *testing.T) {
 
 	t.Run("respects sample rate", func(t *testing.T) {
 		clearEvents(collector)
-		zeroSampleListeners := NewListeners(nil, "test-service", 0.0)
+		zeroSampleListeners := NewListeners(nil, events.NewDispatcher(), "test-service", 0.0)
 		zeroSampleListeners.collector = collector
 
 		e := &queue.JobProcessed{
@@ -297,7 +299,7 @@ func TestOnJobProcessed(t *testing.T) {
 
 func TestOnJobFailed(t *testing.T) {
 	collector := testCollector()
-	listeners := NewListeners(collector, "test-service", 1.0)
+	listeners := NewListeners(collector, events.NewDispatcher(), "test-service", 1.0)
 
 	t.Run("records job failed event", func(t *testing.T) {
 		clearEvents(collector)
@@ -368,7 +370,7 @@ func TestOnJobFailed(t *testing.T) {
 
 	t.Run("respects sample rate", func(t *testing.T) {
 		clearEvents(collector)
-		zeroSampleListeners := NewListeners(nil, "test-service", 0.0)
+		zeroSampleListeners := NewListeners(nil, events.NewDispatcher(), "test-service", 0.0)
 		zeroSampleListeners.collector = collector
 
 		e := &queue.JobFailed{
@@ -423,5 +425,36 @@ func TestNewJobEvent(t *testing.T) {
 func TestEventTypeJobConstant(t *testing.T) {
 	if EventTypeJob != "job" {
 		t.Errorf("EventTypeJob = %q, want %q", EventTypeJob, "job")
+	}
+}
+
+func TestRegisterUnregister_RoundTrip(t *testing.T) {
+	collector := testCollector()
+	dispatcher := events.NewDispatcher()
+	listeners := NewListeners(collector, dispatcher, "test-service", 1.0)
+
+	listeners.Register()
+
+	handled := &router.RequestHandled{
+		Context:    context.Background(),
+		Method:     "GET",
+		Path:       "/ping",
+		StatusCode: 200,
+		Duration:   5 * time.Millisecond,
+	}
+	if err := dispatcher.Dispatch(context.Background(), handled); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if got := len(getEvents(collector)); got != 1 {
+		t.Fatalf("after Register: collector has %d events, want 1", got)
+	}
+
+	listeners.Unregister()
+
+	if err := dispatcher.Dispatch(context.Background(), handled); err != nil {
+		t.Fatalf("Dispatch after Unregister: %v", err)
+	}
+	if got := len(getEvents(collector)); got != 1 {
+		t.Fatalf("after Unregister: collector has %d events, want 1 (no new events)", got)
 	}
 }

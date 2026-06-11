@@ -2,45 +2,52 @@ package velwatch
 
 import (
 	"context"
-	"log"
 	"math/rand"
-	"time"
 
-	"github.com/velocitykode/velocity/pkg/cache"
-	"github.com/velocitykode/velocity/pkg/events"
-	"github.com/velocitykode/velocity/pkg/httpclient"
-	"github.com/velocitykode/velocity/pkg/mail"
-	"github.com/velocitykode/velocity/pkg/orm"
-	"github.com/velocitykode/velocity/pkg/queue"
-	"github.com/velocitykode/velocity/pkg/router"
-	"github.com/velocitykode/velocity/pkg/scheduler"
+	"github.com/velocitykode/velocity/cache"
+	"github.com/velocitykode/velocity/contract"
+	"github.com/velocitykode/velocity/httpclient"
+	"github.com/velocitykode/velocity/mail"
+	"github.com/velocitykode/velocity/orm"
+	"github.com/velocitykode/velocity/queue"
+	"github.com/velocitykode/velocity/router"
+	"github.com/velocitykode/velocity/scheduler"
 )
+
+// listenerFunc adapts a plain handler function to contract.EventListener.
+type listenerFunc func(event interface{}) error
+
+func (f listenerFunc) Handle(_ context.Context, event interface{}) error {
+	return f(event)
+}
+
+func (f listenerFunc) ShouldQueue() bool { return false }
 
 // Listeners manages event listeners for Velocity framework events
 type Listeners struct {
 	collector   *Collector
+	dispatcher  contract.Dispatcher
 	serviceName string
 	sampleRate  float64
 
-	// Registered event names for cleanup
-	eventNames []string
+	// Registered listener IDs for cleanup
+	listenerIDs []int
 }
 
-// NewListeners creates a new listeners manager
-func NewListeners(collector *Collector, serviceName string, sampleRate float64) *Listeners {
+// NewListeners creates a new listeners manager bound to the app's event dispatcher
+func NewListeners(collector *Collector, dispatcher contract.Dispatcher, serviceName string, sampleRate float64) *Listeners {
 	return &Listeners{
 		collector:   collector,
+		dispatcher:  dispatcher,
 		serviceName: serviceName,
 		sampleRate:  sampleRate,
-		eventNames:  make([]string, 0),
+		listenerIDs: make([]int, 0),
 	}
 }
 
 // Register registers all Velocity event listeners
 func (l *Listeners) Register() {
-	log.Printf("[VELWATCH] Registering event listeners...")
-
-	// HTTP request events - use raw listeners due to OnEvent wrapper issue
+	// HTTP request events
 	l.registerRawListener("request.handled", func(e interface{}) error {
 		if r, ok := e.(*router.RequestHandled); ok {
 			return l.onRequestHandled(r)
@@ -48,11 +55,9 @@ func (l *Listeners) Register() {
 		return nil
 	})
 	l.registerRawListener("request.failed", func(e interface{}) error {
-		log.Printf("[VELWATCH] request.failed raw listener called, type=%T", e)
 		if r, ok := e.(*router.RequestFailed); ok {
 			return l.onRequestFailed(r)
 		}
-		log.Printf("[VELWATCH] request.failed type assertion failed")
 		return nil
 	})
 
@@ -161,21 +166,16 @@ func (l *Listeners) Register() {
 
 // Unregister removes all registered event listeners
 func (l *Listeners) Unregister() {
-	for _, name := range l.eventNames {
-		events.Forget(name)
+	for _, id := range l.listenerIDs {
+		l.dispatcher.Off(id)
 	}
-	l.eventNames = nil
+	l.listenerIDs = nil
 }
 
-func (l *Listeners) registerTypedListener(eventName string, handler func(event interface{}) error) {
-	events.On(eventName, handler)
-	l.eventNames = append(l.eventNames, eventName)
-}
-
-// registerRawListener registers a raw event listener without the OnEvent wrapper
+// registerRawListener registers an event listener on the app's dispatcher
 func (l *Listeners) registerRawListener(eventName string, handler func(event interface{}) error) {
-	events.On(eventName, handler)
-	l.eventNames = append(l.eventNames, eventName)
+	id := l.dispatcher.Listen(eventName, listenerFunc(handler))
+	l.listenerIDs = append(l.listenerIDs, id)
 }
 
 // shouldSample returns true if this request should be sampled
@@ -217,9 +217,17 @@ func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
 	return nil
 }
 
+// onRequestFailed records the error detail for a failed request as an
+// exception event only. The request record itself comes from the
+// request.handled event, which the router fires for every request
+// (including failed ones) with the real status code and duration; emitting
+// a request event here too would double-count failed requests. The two
+// events share RequestID/TraceID/SpanID, so the exception stays correlated
+// with its request record.
 func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
-	log.Printf("[VELWATCH] onRequestFailed called: path=%s, error=%v, recovered=%v", e.Path, e.Error, e.Recovered)
-
+	if e.Error == nil {
+		return nil
+	}
 	if !l.shouldSample() {
 		return nil
 	}
@@ -234,33 +242,21 @@ func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
 		spanID = GenerateSpanID()
 	}
 
-	// Record request event with error
-	event := NewRequestEvent(e.Method, e.Path, 500, 0)
-	event.TraceID = traceID
-	event.SpanID = spanID
-	event.Tags["service"] = l.serviceName
-
-	if e.Error != nil {
-		event.Attributes["error"] = e.Error.Error()
-	}
+	exEvent := NewExceptionEvent(
+		"RequestError",
+		e.Error.Error(),
+		e.Stack,
+	)
+	exEvent.TraceID = traceID
+	exEvent.SpanID = spanID
+	exEvent.Tags["service"] = l.serviceName
+	exEvent.Attributes["method"] = e.Method
+	exEvent.Attributes["path"] = e.Path
+	exEvent.Attributes["request_id"] = e.RequestID
 	if e.Recovered {
-		event.Attributes["recovered"] = true
+		exEvent.Attributes["recovered"] = true
 	}
-
-	l.collector.Add(event)
-
-	// Also record an exception event
-	if e.Error != nil {
-		exEvent := NewExceptionEvent(
-			"RequestError",
-			e.Error.Error(),
-			e.Stack,
-		)
-		exEvent.TraceID = traceID
-		exEvent.SpanID = spanID
-		exEvent.Tags["service"] = l.serviceName
-		l.collector.Add(exEvent)
-	}
+	l.collector.Add(exEvent)
 
 	return nil
 }
@@ -704,9 +700,4 @@ func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	event.Tags["service"] = sdk.config.ServiceName
 
 	sdk.collector.Add(event)
-}
-
-// init seeds the random number generator
-func init() {
-	rand.Seed(time.Now().UnixNano())
 }

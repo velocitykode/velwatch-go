@@ -2,23 +2,26 @@
 // It captures requests, database queries, cache operations, and exceptions,
 // sending them to the Velwatch APM service for monitoring and analysis.
 //
-// Basic usage:
+// Usage: add a blank import and set VELWATCH_TOKEN. No initialization code
+// is needed; the SDK auto-initializes during velocity.New() and is flushed
+// and closed by App.Shutdown.
 //
-//	import "github.com/velwatch/sdk-go"
+//	import (
+//	    _ "github.com/velocitykode/velwatch-go"
+//	)
 //
-//	func main() {
-//	    err := velwatch.Init(velwatch.Config{
-//	        Endpoint:    "velwatch.example.com:50051",
-//	        Token:       os.Getenv("VELWATCH_TOKEN"),
-//	        ServiceName: "my-api",
-//	    })
-//	    if err != nil {
-//	        log.Fatal(err)
-//	    }
-//	    defer velwatch.Shutdown()
+// Environment variables:
 //
-//	    // Your Velocity app code
-//	}
+//	VELWATCH_TOKEN          project API token (required; unset = SDK dormant)
+//	VELWATCH_ENDPOINT       gRPC ingest endpoint (default "localhost:50051")
+//	VELWATCH_SERVICE_NAME   service name in traces (default APP_NAME)
+//	VELWATCH_INSECURE       "true" disables TLS for local development
+//	VELWATCH_SAMPLE_RATE    fraction of requests traced, 0.0-1.0 (default 1.0)
+//	VELWATCH_BATCH_SIZE     events per batch (default 100)
+//	VELWATCH_FLUSH_INTERVAL flush cadence, e.g. "2s" (default 1s)
+//	VELWATCH_DISABLED       "true" disables the SDK entirely
+//
+// For programmatic configuration, call Init(app, Config) explicitly instead.
 package velwatch
 
 import (
@@ -26,6 +29,9 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/velocitykode/velocity"
+	"github.com/velocitykode/velocity/contract"
 )
 
 // Config contains configuration options for the Velwatch SDK
@@ -76,14 +82,28 @@ type SDK struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// Init initializes the Velwatch SDK with the given configuration.
-// It should be called once at application startup.
-func Init(config Config) error {
+// Init initializes the Velwatch SDK against a constructed Velocity app.
+// Most applications do not need to call this: a blank import of this
+// package plus the VELWATCH_* environment variables auto-initializes the
+// SDK during velocity.New() (see autoinit.go). Init is the programmatic
+// escape hatch for explicit configuration.
+func Init(app *velocity.App, config Config) error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	var dispatcher contract.Dispatcher
+	if app != nil {
+		dispatcher = app.Services.Events
+	}
+	return initLocked(dispatcher, config)
+}
+
+// initLocked performs the shared initialization. mu must be held.
+func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if instance != nil {
 		return ErrAlreadyInitialized
 	}
@@ -106,6 +126,9 @@ func Init(config Config) error {
 	}
 
 	// Validate required fields
+	if dispatcher == nil {
+		return errors.New("velwatch: a Velocity app with an event dispatcher is required")
+	}
 	if config.Endpoint == "" {
 		return errors.New("velwatch: Endpoint is required")
 	}
@@ -125,8 +148,8 @@ func Init(config Config) error {
 	// Create collector
 	collector := NewCollector(transport, config.BatchSize, config.FlushInterval)
 
-	// Create and register event listeners
-	listeners := NewListeners(collector, config.ServiceName, config.SampleRate)
+	// Create and register event listeners on the app's dispatcher
+	listeners := NewListeners(collector, dispatcher, config.ServiceName, config.SampleRate)
 
 	sdk := &SDK{
 		config:    config,
@@ -149,44 +172,62 @@ func Init(config Config) error {
 }
 
 // Shutdown gracefully shuts down the SDK, flushing any remaining events.
-// It should be called when the application is shutting down.
+// Auto-initialized apps do not need to call this: the SDK registers itself
+// as an app component and App.Shutdown's ShutdownAware sweep closes it.
 func Shutdown() error {
 	mu.Lock()
-	defer mu.Unlock()
-
-	if instance == nil {
-		return nil
-	}
-
 	sdk := instance
 	instance = nil
+	mu.Unlock()
 
-	if sdk.config.Disabled {
+	if sdk == nil {
 		return nil
 	}
+	return sdk.close()
+}
 
-	// Cancel context to stop flush loop
-	sdk.cancel()
-
-	// Wait for flush loop to finish
-	sdk.wg.Wait()
-
-	// Final flush
-	if sdk.collector != nil {
-		sdk.collector.Flush()
+// Shutdown flushes remaining events and closes the transport. It satisfies
+// contract.ShutdownAware so the SDK can live in the app component registry
+// and be torn down by App.Shutdown without consumer code. Idempotent; safe
+// to combine with the package-level Shutdown().
+func (sdk *SDK) Shutdown(ctx context.Context) error {
+	mu.Lock()
+	if instance == sdk {
+		instance = nil
 	}
+	mu.Unlock()
+	return sdk.close()
+}
 
-	// Close transport
-	if sdk.transport != nil {
-		return sdk.transport.Close()
-	}
+// close performs the actual teardown exactly once.
+func (sdk *SDK) close() error {
+	sdk.closeOnce.Do(func() {
+		if sdk.config.Disabled {
+			return
+		}
 
-	// Unregister listeners
-	if sdk.listeners != nil {
-		sdk.listeners.Unregister()
-	}
+		// Unregister listeners first so no new events arrive during teardown
+		if sdk.listeners != nil {
+			sdk.listeners.Unregister()
+		}
 
-	return nil
+		// Stop the flush loop and wait for it to finish
+		if sdk.cancel != nil {
+			sdk.cancel()
+		}
+		sdk.wg.Wait()
+
+		// Final flush
+		if sdk.collector != nil {
+			sdk.collector.Flush()
+		}
+
+		// Close transport
+		if sdk.transport != nil {
+			sdk.closeErr = sdk.transport.Close()
+		}
+	})
+	return sdk.closeErr
 }
 
 func (sdk *SDK) flushLoop() {

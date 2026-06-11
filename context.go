@@ -3,7 +3,7 @@ package velwatch
 import (
 	"context"
 
-	"github.com/velocitykode/velocity/pkg/trace"
+	"github.com/velocitykode/velocity/trace"
 )
 
 // WithTraceContext adds trace context to a context
@@ -35,12 +35,12 @@ func GetParentID(ctx context.Context) string {
 
 // GenerateTraceID generates a new random trace ID (32 hex chars)
 func GenerateTraceID() string {
-	return trace.GenerateTraceID()
+	return trace.MustGenerateTraceID()
 }
 
 // GenerateSpanID generates a new random span ID (16 hex chars)
 func GenerateSpanID() string {
-	return trace.GenerateSpanID()
+	return trace.MustGenerateSpanID()
 }
 
 // StartSpan creates a new span within the current trace
