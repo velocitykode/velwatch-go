@@ -3,7 +3,7 @@ module github.com/velocitykode/velwatch-go
 go 1.26.3
 
 require (
-	github.com/velocitykode/velocity v0.6.8
+	github.com/velocitykode/velocity v0.58.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 )
@@ -50,5 +50,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.51.0 // indirect
 )
-
-replace github.com/velocitykode/velocity => /Users/ali/code/velocity
