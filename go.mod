@@ -3,7 +3,7 @@ module github.com/velocitykode/velwatch-go
 go 1.26.3
 
 require (
-	github.com/velocitykode/velocity v0.62.0
+	github.com/velocitykode/velocity v0.62.1
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 )
