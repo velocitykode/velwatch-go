@@ -10,45 +10,76 @@ go get github.com/velocitykode/velwatch-go
 
 ## Quick Start
 
+The SDK auto-initializes during `velocity.New()`. Add a blank import and set
+`VELWATCH_TOKEN`; no initialization code is needed. The SDK is flushed and
+closed automatically by `App.Shutdown`.
+
 ```go
 package main
 
 import (
-    "os"
-    "log"
-
-    "github.com/velocitykode/velwatch-go"
+    _ "github.com/velocitykode/velwatch-go" // auto-initializes from VELWATCH_* env
 )
+```
 
-func main() {
-    // Initialize Velwatch SDK
-    err := velwatch.Init(velwatch.Config{
-        Endpoint:    "velwatch.example.com:50051",
-        Token:       os.Getenv("VELWATCH_TOKEN"),
-        ServiceName: "my-api",
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer velwatch.Shutdown()
+```bash
+VELWATCH_TOKEN=vw_xxx
+VELWATCH_ENDPOINT=velwatch.example.com:50051
+VELWATCH_SERVICE_NAME=my-api
+```
 
-    // Your Velocity application code
-    app.Run()
+Without `VELWATCH_TOKEN` the SDK stays dormant (no-op), so it is safe to leave
+the import in place across environments.
+
+### Programmatic initialization
+
+For explicit configuration, call `Init` with a constructed Velocity app:
+
+```go
+err := velwatch.Init(app, velwatch.Config{
+    Endpoint:    "velwatch.example.com:50051",
+    Token:       os.Getenv("VELWATCH_TOKEN"),
+    ServiceName: "my-api",
+})
+if err != nil {
+    log.Fatal(err)
 }
+defer velwatch.Shutdown()
 ```
 
 ## Configuration Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `Endpoint` | string | required | Velwatch gRPC endpoint |
-| `Token` | string | required | Project API token (vw_xxx) |
+| `Endpoint` | string | required | Ingest endpoint (host:port for gRPC, URL for OTLP/HTTP) |
+| `Token` | string | required | Project API token (vw_xxx), sent as a Bearer token |
 | `ServiceName` | string | required | Service name for identification |
+| `Protocol` | string | `grpc` | Wire protocol: `grpc`, `otlp`, or `otlphttp` |
 | `BatchSize` | int | 100 | Events to batch before sending |
 | `FlushInterval` | time.Duration | 1s | How often to flush batched events |
 | `Insecure` | bool | false | Disable TLS (for local dev) |
 | `Disabled` | bool | false | Completely disable SDK |
 | `SampleRate` | float64 | 1.0 | Percentage of requests to trace |
+
+## Wire Protocols
+
+The SDK ships events over one of three wires, selected by `Protocol`
+(`VELWATCH_PROTOCOL`). All authenticate with the project token as
+`Authorization: Bearer <token>`.
+
+| `Protocol` | Wire | Use |
+|------------|------|-----|
+| `grpc` (default) | Legacy Velwatch `EventService` proto | Existing deployments |
+| `otlp` | OpenTelemetry OTLP/gRPC | Backend services |
+| `otlphttp` | OpenTelemetry OTLP/HTTP (`application/x-protobuf`) | Browser, serverless, edge, mobile runtimes |
+
+The OTLP exporters map events onto OpenTelemetry spans following OTel semantic
+conventions (`http.*`, `db.*`, `messaging.*`, and `exception.*` span events),
+preserving W3C-shaped trace and span IDs. This lets Velwatch ingest first-party
+SDK telemetry and any standard OpenTelemetry source through one path.
+
+For OTLP/HTTP, `Endpoint` may be a base URL (`https://host:4318`) or a full
+traces URL; the standard `/v1/traces` path is appended when absent.
 
 ## Automatic Instrumentation
 
@@ -142,20 +173,25 @@ ctx = velwatch.ContextFromTraceHeader(ctx, th)
 The SDK respects the following environment variables:
 
 ```bash
-VELWATCH_TOKEN=vw_xxx       # Project API token
-VELWATCH_ENDPOINT=host:port # gRPC endpoint
-VELWATCH_SERVICE=my-api     # Service name
-VELWATCH_SAMPLE_RATE=0.5    # Sample rate (0.0-1.0)
+VELWATCH_TOKEN=vw_xxx            # Project API token (unset = SDK dormant)
+VELWATCH_ENDPOINT=host:port      # Ingest endpoint
+VELWATCH_SERVICE_NAME=my-api     # Service name (default APP_NAME)
+VELWATCH_PROTOCOL=grpc           # Wire protocol: grpc | otlp | otlphttp
+VELWATCH_SAMPLE_RATE=0.5         # Sample rate (0.0-1.0)
+VELWATCH_BATCH_SIZE=100          # Events per batch
+VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
+VELWATCH_INSECURE=true           # Disable TLS (local dev)
+VELWATCH_DISABLED=true           # Disable the SDK entirely
 ```
 
 ## Testing
 
-Disable the SDK during tests:
+Disable the SDK during tests by leaving `VELWATCH_TOKEN` unset (the SDK stays
+dormant), or set `VELWATCH_DISABLED=true`. For programmatic init, pass
+`Disabled: true`:
 
 ```go
-velwatch.Init(velwatch.Config{
-    Disabled: true,
-})
+velwatch.Init(app, velwatch.Config{Disabled: true})
 ```
 
 ## Best Practices
