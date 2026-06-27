@@ -15,7 +15,7 @@ func testCollector() *Collector {
 	// Use a large batch size and long flush interval to prevent auto-flushing
 	return &Collector{
 		events:        make([]*Event, 0, 1000),
-		transport:     nil, // Won't be used since we won't reach batch size
+		exporter:      nil, // Won't be used since we won't reach batch size
 		batchSize:     1000,
 		flushInterval: time.Hour,
 	}

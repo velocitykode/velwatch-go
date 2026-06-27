@@ -5,20 +5,20 @@ import (
 	"time"
 )
 
-// Collector batches events before sending them to the transport
+// Collector batches events before handing them to the exporter
 type Collector struct {
 	events        []*Event
 	mu            sync.Mutex
-	transport     *Transport
+	exporter      Exporter
 	batchSize     int
 	flushInterval time.Duration
 }
 
 // NewCollector creates a new event collector
-func NewCollector(transport *Transport, batchSize int, flushInterval time.Duration) *Collector {
+func NewCollector(exporter Exporter, batchSize int, flushInterval time.Duration) *Collector {
 	return &Collector{
 		events:        make([]*Event, 0, batchSize),
-		transport:     transport,
+		exporter:      exporter,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 	}
@@ -59,7 +59,7 @@ func (c *Collector) flushLocked() {
 	c.events = make([]*Event, 0, c.batchSize)
 
 	// Send asynchronously to avoid blocking
-	go c.transport.Send(events)
+	go c.exporter.Export(events)
 }
 
 // Len returns the current number of batched events

@@ -50,6 +50,7 @@ func configFromEnv() Config {
 		Endpoint:    envOr("VELWATCH_ENDPOINT", "localhost:50051"),
 		Token:       os.Getenv("VELWATCH_TOKEN"),
 		ServiceName: envOr("VELWATCH_SERVICE_NAME", os.Getenv("APP_NAME")),
+		Protocol:    envOr("VELWATCH_PROTOCOL", "grpc"),
 		Insecure:    os.Getenv("VELWATCH_INSECURE") == "true",
 		Disabled:    os.Getenv("VELWATCH_DISABLED") == "true",
 	}

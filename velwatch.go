@@ -13,8 +13,10 @@
 // Environment variables:
 //
 //	VELWATCH_TOKEN          project API token (required; unset = SDK dormant)
-//	VELWATCH_ENDPOINT       gRPC ingest endpoint (default "localhost:50051")
+//	VELWATCH_ENDPOINT       ingest endpoint (default "localhost:50051")
 //	VELWATCH_SERVICE_NAME   service name in traces (default APP_NAME)
+//	VELWATCH_PROTOCOL       wire protocol: "grpc" (legacy), "otlp" (OTLP/gRPC),
+//	                        or "otlphttp" (OTLP/HTTP) (default "grpc")
 //	VELWATCH_INSECURE       "true" disables TLS for local development
 //	VELWATCH_SAMPLE_RATE    fraction of requests traced, 0.0-1.0 (default 1.0)
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
@@ -51,6 +53,11 @@ type Config struct {
 	// FlushInterval is how often to flush batched events (default: 1s)
 	FlushInterval time.Duration
 
+	// Protocol selects the wire format: "otlp" for OpenTelemetry OTLP/gRPC,
+	// "otlphttp" for OTLP/HTTP, or "grpc" for the legacy Velwatch proto.
+	// Default: "grpc".
+	Protocol string
+
 	// Insecure disables TLS for local development
 	Insecure bool
 
@@ -77,7 +84,7 @@ var (
 type SDK struct {
 	config    Config
 	collector *Collector
-	transport *Transport
+	exporter  Exporter
 	listeners *Listeners
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -118,6 +125,9 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if config.SampleRate <= 0 || config.SampleRate > 1 {
 		config.SampleRate = 1.0
 	}
+	if config.Protocol == "" {
+		config.Protocol = "grpc"
+	}
 
 	// If disabled, create a no-op instance
 	if config.Disabled {
@@ -138,15 +148,15 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create transport
-	transport, err := NewTransport(config.Endpoint, config.Token, config.Insecure)
+	// Create the exporter for the configured wire protocol
+	exporter, err := newExporter(config)
 	if err != nil {
 		cancel()
 		return err
 	}
 
 	// Create collector
-	collector := NewCollector(transport, config.BatchSize, config.FlushInterval)
+	collector := NewCollector(exporter, config.BatchSize, config.FlushInterval)
 
 	// Create and register event listeners on the app's dispatcher
 	listeners := NewListeners(collector, dispatcher, config.ServiceName, config.SampleRate)
@@ -154,7 +164,7 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	sdk := &SDK{
 		config:    config,
 		collector: collector,
-		transport: transport,
+		exporter:  exporter,
 		listeners: listeners,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -169,6 +179,18 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 
 	instance = sdk
 	return nil
+}
+
+// newExporter builds the exporter for the configured wire protocol.
+func newExporter(config Config) (Exporter, error) {
+	switch config.Protocol {
+	case "otlp":
+		return NewOTLPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+	case "otlphttp":
+		return NewOTLPHTTPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+	default:
+		return NewTransport(config.Endpoint, config.Token, config.Insecure)
+	}
 }
 
 // Shutdown gracefully shuts down the SDK, flushing any remaining events.
@@ -222,9 +244,9 @@ func (sdk *SDK) close() error {
 			sdk.collector.Flush()
 		}
 
-		// Close transport
-		if sdk.transport != nil {
-			sdk.closeErr = sdk.transport.Close()
+		// Close exporter
+		if sdk.exporter != nil {
+			sdk.closeErr = sdk.exporter.Close()
 		}
 	})
 	return sdk.closeErr

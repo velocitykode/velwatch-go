@@ -49,6 +49,12 @@ func NewTransport(endpoint, token string, insecureMode bool) (*Transport, error)
 	}, nil
 }
 
+// Export sends a batch of events. It satisfies the Exporter interface,
+// delegating to Send.
+func (t *Transport) Export(events []*Event) error {
+	return t.Send(events)
+}
+
 // Send sends a batch of events to the Velwatch backend
 func (t *Transport) Send(events []*Event) error {
 	if len(events) == 0 {
