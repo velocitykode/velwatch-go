@@ -16,9 +16,11 @@ import (
 
 // Transport handles sending events to the Velwatch backend via gRPC
 type Transport struct {
-	conn   *grpc.ClientConn
-	client eventsv1.EventServiceClient
-	token  string
+	conn      *grpc.ClientConn
+	client    eventsv1.EventServiceClient
+	token     string
+	release   string
+	commitSHA string
 }
 
 // NewTransport creates a new gRPC transport
@@ -64,6 +66,10 @@ func (t *Transport) Send(events []*Event) error {
 	// Convert to proto events
 	protoEvents := make([]*eventsv1.Event, 0, len(events))
 	for _, e := range events {
+		// Stamp resolved release/commit metadata without clobbering caller tags.
+		e.setDefaultTag(tagRelease, t.release)
+		e.setDefaultTag(tagCommitSHA, t.commitSHA)
+
 		protoEvent := &eventsv1.Event{
 			Type:           e.Type,
 			TimestampMs:    e.Timestamp.UnixMilli(),

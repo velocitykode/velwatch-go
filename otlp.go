@@ -36,6 +36,8 @@ type OTLPExporter struct {
 	client      coltracepb.TraceServiceClient
 	token       string
 	serviceName string
+	release     string
+	commitSHA   string
 }
 
 // NewOTLPExporter dials an OTLP/gRPC trace endpoint (default port 4317).
@@ -70,7 +72,7 @@ func (e *OTLPExporter) Export(events []*Event) error {
 		return nil
 	}
 
-	req := buildExportRequest(events, e.serviceName)
+	req := buildExportRequest(events, e.serviceName, e.release, e.commitSHA)
 
 	ctx := metadata.AppendToOutgoingContext(context.Background(),
 		"authorization", "Bearer "+e.token)
@@ -85,23 +87,33 @@ func (e *OTLPExporter) Export(events []*Event) error {
 }
 
 // buildExportRequest assembles events into a single OTLP ExportTraceService
-// request grouped under one resource for the given service. Shared by the gRPC
-// and HTTP exporters.
-func buildExportRequest(events []*Event, serviceName string) *coltracepb.ExportTraceServiceRequest {
+// request grouped under one resource for the given service. The release and
+// commit SHA, when non-empty, ride as the service.version and
+// vcs.ref.head.revision resource attributes. Shared by the gRPC and HTTP
+// exporters.
+func buildExportRequest(events []*Event, serviceName, release, commitSHA string) *coltracepb.ExportTraceServiceRequest {
 	spans := make([]*tracepb.Span, 0, len(events))
 	for _, ev := range events {
 		spans = append(spans, eventToSpan(ev))
 	}
 
+	resourceAttrs := []*commonpb.KeyValue{
+		stringAttr("service.name", serviceName),
+		stringAttr("telemetry.sdk.name", sdkName),
+		stringAttr("telemetry.sdk.language", "go"),
+		stringAttr("telemetry.sdk.version", sdkVersion),
+	}
+	if release != "" {
+		resourceAttrs = append(resourceAttrs, stringAttr(otelServiceVersion, release))
+	}
+	if commitSHA != "" {
+		resourceAttrs = append(resourceAttrs, stringAttr(otelVCSRevision, commitSHA))
+	}
+
 	return &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{{
 			Resource: &resourcepb.Resource{
-				Attributes: []*commonpb.KeyValue{
-					stringAttr("service.name", serviceName),
-					stringAttr("telemetry.sdk.name", sdkName),
-					stringAttr("telemetry.sdk.language", "go"),
-					stringAttr("telemetry.sdk.version", sdkVersion),
-				},
+				Attributes: resourceAttrs,
 			},
 			ScopeSpans: []*tracepb.ScopeSpans{{
 				Scope: &commonpb.InstrumentationScope{Name: sdkName, Version: sdkVersion},

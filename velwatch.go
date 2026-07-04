@@ -22,6 +22,11 @@
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
 //	VELWATCH_FLUSH_INTERVAL flush cadence, e.g. "2s" (default 1s)
 //	VELWATCH_DISABLED       "true" disables the SDK entirely
+//	VELWATCH_RELEASE        deployed service version (OTLP service.version)
+//	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
+//
+// VELWATCH_RELEASE and VELWATCH_COMMIT_SHA also fall back to the standard
+// OTEL_RESOURCE_ATTRIBUTES keys service.version and vcs.ref.head.revision.
 //
 // For programmatic configuration, call Init(app, Config) explicitly instead.
 package velwatch
@@ -66,6 +71,20 @@ type Config struct {
 
 	// SampleRate is the percentage of requests to trace (0.0-1.0, default: 1.0)
 	SampleRate float64
+
+	// Release identifies the deployed version of the instrumented service
+	// (e.g. "1.4.2" or a build tag). When set it is stamped on every event as
+	// the "release" tag and emitted as the OTLP service.version resource
+	// attribute. If empty it is resolved from VELWATCH_RELEASE, then from
+	// service.version in OTEL_RESOURCE_ATTRIBUTES.
+	Release string
+
+	// CommitSHA identifies the VCS revision the service was built from. When
+	// set it is stamped on every event as the "commit_sha" tag and emitted as
+	// the OTLP vcs.ref.head.revision resource attribute. If empty it is
+	// resolved from VELWATCH_COMMIT_SHA, then from vcs.ref.head.revision in
+	// OTEL_RESOURCE_ATTRIBUTES.
+	CommitSHA string
 }
 
 var (
@@ -129,6 +148,10 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 		config.Protocol = "grpc"
 	}
 
+	// Resolve release/commit metadata once, honoring explicit config over
+	// VELWATCH_* env over OTEL_RESOURCE_ATTRIBUTES.
+	config.Release, config.CommitSHA = resolveReleaseInfo(config.Release, config.CommitSHA)
+
 	// If disabled, create a no-op instance
 	if config.Disabled {
 		instance = &SDK{config: config}
@@ -181,15 +204,31 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	return nil
 }
 
-// newExporter builds the exporter for the configured wire protocol.
+// newExporter builds the exporter for the configured wire protocol, threading
+// the resolved release/commit metadata to it.
 func newExporter(config Config) (Exporter, error) {
 	switch config.Protocol {
 	case "otlp":
-		return NewOTLPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+		exp, err := NewOTLPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+		if err != nil {
+			return nil, err
+		}
+		exp.release, exp.commitSHA = config.Release, config.CommitSHA
+		return exp, nil
 	case "otlphttp":
-		return NewOTLPHTTPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+		exp, err := NewOTLPHTTPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
+		if err != nil {
+			return nil, err
+		}
+		exp.release, exp.commitSHA = config.Release, config.CommitSHA
+		return exp, nil
 	default:
-		return NewTransport(config.Endpoint, config.Token, config.Insecure)
+		exp, err := NewTransport(config.Endpoint, config.Token, config.Insecure)
+		if err != nil {
+			return nil, err
+		}
+		exp.release, exp.commitSHA = config.Release, config.CommitSHA
+		return exp, nil
 	}
 }
 

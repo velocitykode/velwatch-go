@@ -22,6 +22,8 @@ type OTLPHTTPExporter struct {
 	url         string
 	token       string
 	serviceName string
+	release     string
+	commitSHA   string
 	client      *http.Client
 }
 
@@ -59,7 +61,7 @@ func (e *OTLPHTTPExporter) Export(events []*Event) error {
 		return nil
 	}
 
-	body, err := proto.Marshal(buildExportRequest(events, e.serviceName))
+	body, err := proto.Marshal(buildExportRequest(events, e.serviceName, e.release, e.commitSHA))
 	if err != nil {
 		log.Printf("velwatch: failed to marshal OTLP request: %v", err)
 		return err

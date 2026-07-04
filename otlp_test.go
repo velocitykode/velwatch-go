@@ -129,6 +129,34 @@ func TestDecodeID_InvalidFallsBackToRandom(t *testing.T) {
 	}
 }
 
+func TestBuildExportRequest_ReleaseResourceAttrs(t *testing.T) {
+	events := []*Event{NewRequestEvent("GET", "/", 200, 1)}
+
+	// Present when release/commit are non-empty.
+	req := buildExportRequest(events, "api", "1.4.2", "abc123")
+	res := attrMap(req.ResourceSpans[0].Resource.Attributes)
+	if v := res["service.version"].GetStringValue(); v != "1.4.2" {
+		t.Errorf("service.version = %q, want 1.4.2", v)
+	}
+	if v := res["vcs.ref.head.revision"].GetStringValue(); v != "abc123" {
+		t.Errorf("vcs.ref.head.revision = %q, want abc123", v)
+	}
+	// Baseline resource attributes remain.
+	if v := res["service.name"].GetStringValue(); v != "api" {
+		t.Errorf("service.name = %q, want api", v)
+	}
+
+	// Absent when release/commit are empty, no empty-valued attributes.
+	req = buildExportRequest(events, "api", "", "")
+	res = attrMap(req.ResourceSpans[0].Resource.Attributes)
+	if _, ok := res["service.version"]; ok {
+		t.Error("service.version should be absent when release is empty")
+	}
+	if _, ok := res["vcs.ref.head.revision"]; ok {
+		t.Error("vcs.ref.head.revision should be absent when commit SHA is empty")
+	}
+}
+
 func TestEventToSpan_ParentID(t *testing.T) {
 	e := NewRequestEvent("GET", "/", 200, 1)
 	e.TraceID = "0123456789abcdef0123456789abcdef"

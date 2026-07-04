@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+// Reserved tag keys the SDK stamps onto every outgoing native event when a
+// release or commit SHA has been resolved. A tag the caller set explicitly on
+// an event is never overwritten.
+const (
+	tagRelease   = "release"
+	tagCommitSHA = "commit_sha"
+)
+
 // Event types
 const (
 	EventTypeRequest         = "request"
@@ -136,6 +144,22 @@ func (e *Event) WithTag(key, value string) *Event {
 	}
 	e.Tags[key] = value
 	return e
+}
+
+// setDefaultTag sets a tag only when value is non-empty and the key is not
+// already present, so SDK-injected defaults (release, commit_sha) never clobber
+// a tag the caller set explicitly on the event.
+func (e *Event) setDefaultTag(key, value string) {
+	if value == "" {
+		return
+	}
+	if e.Tags == nil {
+		e.Tags = make(map[string]string)
+	}
+	if _, ok := e.Tags[key]; ok {
+		return
+	}
+	e.Tags[key] = value
 }
 
 // WithAttribute adds an attribute to the event
