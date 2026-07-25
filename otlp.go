@@ -26,6 +26,13 @@ const (
 	sdkVersion = "0.1.0"
 )
 
+// attrExceptionEnvelope marks the span this SDK builds to carry an exception
+// event, which represents the exception itself rather than any unit of work.
+// Namespaced like the other velocity.* markers the collector keys on. The
+// collector strips it before storage and, on seeing it, stores only the
+// exception record with this span's own id and parent.
+const attrExceptionEnvelope = "velocity.exception.envelope"
+
 // OTLPExporter ships events as OpenTelemetry spans over OTLP/gRPC. This is the
 // standard, ecosystem-compatible wire: the same protocol any OTel-instrumented
 // app speaks, so a Velwatch OTLP receiver ingests first-party and third-party
@@ -153,6 +160,12 @@ func eventToSpan(ev *Event) *tracepb.Span {
 	if ev.Type == EventTypeException {
 		span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR}
 		span.Events = []*tracepb.Span_Event{exceptionSpanEvent(ev, start)}
+		// This span IS the exception; it carries no work of its own. The
+		// marker tells the collector to store the exception alone, keeping
+		// this span's id and parent, instead of also storing the envelope as
+		// a generic span. Kind stays INTERNAL: the marker is the contract, and
+		// a receiver that ignores it still gets a valid OTel span.
+		span.Attributes = append(span.Attributes, anyAttr(attrExceptionEnvelope, true))
 	}
 	return span
 }
