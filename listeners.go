@@ -21,7 +21,7 @@ func (f listenerFunc) Handle(_ context.Context, event interface{}) error {
 	return f(event)
 }
 
-func (f listenerFunc) ShouldQueue() bool { return false }
+func (f listenerFunc) Async() bool { return false }
 
 // Listeners manages event listeners for Velocity framework events
 type Listeners struct {
