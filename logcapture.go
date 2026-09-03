@@ -75,16 +75,27 @@ func (s *SpanLogs) ParentID() string { return s.parentID }
 // The per-span cap is enforced here, at capture time, so one span cannot hold
 // unbounded memory however much it logs. Once the buffer holds maxLines, only
 // error lines are still taken: a span that emits five hundred info lines and
-// then fails still records the error that explains it. Refused lines are
-// counted on DroppedByCap.
+// then fails still records the error that explains it. Error lines get their
+// own headroom of another maxLines on top of the cap, after which they are
+// refused too, so a span that logs an error per loop iteration is bounded at
+// twice the cap rather than not at all. Refused lines are counted on
+// DroppedByCap.
 func (s *SpanLogs) append(line LogLine) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.maxLines > 0 && len(s.lines) >= s.maxLines && line.Level < slog.LevelError {
-		return false
+	if s.maxLines > 0 && len(s.lines) >= s.maxLines {
+		if line.Level < slog.LevelError || len(s.lines) >= s.hardCap() {
+			return false
+		}
 	}
 	s.lines = append(s.lines, line)
 	return true
+}
+
+// hardCap is the ceiling no line, error or not, is buffered past: the cap plus
+// an equal headroom reserved for error lines. Callers must hold s.mu.
+func (s *SpanLogs) hardCap() int {
+	return s.maxLines * 2
 }
 
 // Lines returns a copy of the buffered lines in capture order.

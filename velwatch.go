@@ -152,7 +152,9 @@ type Config struct {
 
 	// LogMaxLines is the most log lines one span will buffer. Once a span
 	// reaches it, only error lines are still captured, so a span that logs
-	// heavily and then fails still records the failure. Lines refused by the
+	// heavily and then fails still records the failure; error lines have
+	// another LogMaxLines of headroom past the cap and are refused beyond
+	// that, so no span buffers more than twice the cap. Lines refused by the
 	// cap are counted on SpanLogs.DroppedByCap and reported on the span's
 	// record as "log.dropped". Zero selects the default of 50; a negative
 	// value is rejected by initialization. Resolved from
