@@ -63,16 +63,26 @@ func (h *recordingHandler) messages() []string {
 	return out
 }
 
-// captureForTest installs log capture in front of a recording handler and
-// restores the previous slog default when the test ends.
+// captureForTest installs log capture with no capture limits in front of a
+// recording handler at info level, and restores the previous slog default
+// when the test ends.
 func captureForTest(t *testing.T) *recordingHandler {
+	t.Helper()
+	return captureForTestWith(t, Config{}, slog.LevelInfo)
+}
+
+// captureForTestWith installs log capture with the given resolved capture
+// config in front of a recording handler at sinkLevel, standing in for the
+// application's own logger. The previous slog default is restored when the
+// test ends.
+func captureForTestWith(t *testing.T, config Config, sinkLevel slog.Level) *recordingHandler {
 	t.Helper()
 
 	previous := slog.Default()
-	sink := &recordingHandler{level: slog.LevelInfo}
+	sink := &recordingHandler{level: sinkLevel}
 	slog.SetDefault(slog.New(sink))
 
-	installLogCapture()
+	installLogCapture(config)
 	t.Cleanup(func() {
 		uninstallLogCapture()
 		slog.SetDefault(previous)
@@ -448,5 +458,92 @@ func TestLogCaptureNormalizesAttributeValues(t *testing.T) {
 		if got := lines[0].Attrs[key]; got != value {
 			t.Errorf("Attrs[%q] = %v (%T), want %v (%T)", key, got, got, value, value)
 		}
+	}
+}
+
+// TestSpanLogsCapAllowsErrorsThrough asserts the per-span cap: the first
+// LogMaxLines lines are buffered, further non-error lines are refused and
+// counted, and an error line emitted after the cap is still captured.
+func TestSpanLogsCapAllowsErrorsThrough(t *testing.T) {
+	const maxLines = 50
+	sink := captureForTestWith(t, Config{LogMaxLines: maxLines}, slog.LevelInfo)
+	ctx, logs := tracedContext(t)
+
+	for i := 0; i < 500; i++ {
+		slog.InfoContext(ctx, "chatter")
+	}
+	slog.ErrorContext(ctx, "boom")
+
+	lines := logs.Lines()
+	if len(lines) != maxLines+1 {
+		t.Fatalf("buffered %d lines, want %d (the cap plus the error line)", len(lines), maxLines+1)
+	}
+	for _, line := range lines[:maxLines] {
+		if line.Message != "chatter" {
+			t.Fatalf("buffered %q inside the cap, want the first lines kept", line.Message)
+		}
+	}
+	if last := lines[maxLines]; last.Message != "boom" || last.Level != slog.LevelError {
+		t.Errorf("last line = %q at %v, want the error line past the cap", last.Message, last.Level)
+	}
+	if got := logs.DroppedByCap(); got != 500-maxLines {
+		t.Errorf("DroppedByCap() = %d, want %d", got, 500-maxLines)
+	}
+	if got := logs.Dropped(); got != 500-maxLines {
+		t.Errorf("Dropped() = %d, want %d", got, 500-maxLines)
+	}
+	if got := logs.DroppedByKeepRule(); got != 0 {
+		t.Errorf("DroppedByKeepRule() = %d, want 0: the cap is not a keep rule", got)
+	}
+	if got := sink.count(); got != 501 {
+		t.Errorf("the application handler saw %d records, want 501: the cap governs capture only", got)
+	}
+}
+
+// TestSpanLogsCapExportsAtMostTheCapPlusErrors runs the same span all the way
+// to the collector: a failed span keeps every line the keep rules see, and
+// what they see is already bounded by the cap.
+func TestSpanLogsCapExportsAtMostTheCapPlusErrors(t *testing.T) {
+	const maxLines = 50
+	captureForTestWith(t, Config{LogMaxLines: maxLines}, slog.LevelInfo)
+	sdk, err := initForTest(t, keepRulesConfig(unsampledRate))
+	if err != nil {
+		t.Fatalf("initLocked returned error: %v", err)
+	}
+	ctx, logs := tracedContext(t)
+
+	for i := 0; i < 500; i++ {
+		slog.InfoContext(ctx, "chatter")
+	}
+	slog.ErrorContext(ctx, "boom")
+
+	logs.SetOutcome(SpanOutcome{Failed: true})
+	RecordSpanLogs(logs)
+
+	sent := logEventsIn(sdk.collector)
+	if len(sent) != maxLines+1 {
+		t.Fatalf("exported %d log records, want %d (the cap plus the error line)", len(sent), maxLines+1)
+	}
+	messages := messagesOf(sent)
+	if messages[len(messages)-1] != "boom" {
+		t.Errorf("last exported record = %q, want the error line", messages[len(messages)-1])
+	}
+}
+
+// TestSpanLogsUncappedByDefaultBuffer asserts a buffer with no cap keeps
+// everything, which is what a directly constructed SpanLogs does.
+func TestSpanLogsUncappedBufferKeepsEveryLine(t *testing.T) {
+	captureForTest(t)
+	ctx, logs := tracedContext(t)
+
+	for i := 0; i < 200; i++ {
+		slog.InfoContext(ctx, "chatter")
+	}
+
+	if got := logs.Len(); got != 200 {
+		t.Errorf("buffered %d lines, want 200 with no cap configured", got)
+	}
+	if got := logs.DroppedByCap(); got != 0 {
+		t.Errorf("DroppedByCap() = %d, want 0", got)
 	}
 }

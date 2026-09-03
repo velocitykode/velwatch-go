@@ -39,6 +39,11 @@ type SpanLogs struct {
 	spanID   string
 	parentID string
 
+	// maxLines is the most lines this span will buffer, zero for no cap.
+	// It is fixed when the buffer is created, so a configuration change
+	// cannot move the ceiling out from under a span that is already running.
+	maxLines int
+
 	mu      sync.Mutex
 	lines   []LogLine
 	outcome SpanOutcome
@@ -62,12 +67,20 @@ func (s *SpanLogs) SpanID() string { return s.spanID }
 // the span is the root of its trace.
 func (s *SpanLogs) ParentID() string { return s.parentID }
 
-// append adds a line to the buffer. It reports whether the line was kept.
-// Keep rules and a per-span cap hook in here: a rejected line increments the
-// dropped counter instead of growing the buffer.
+// append adds a line to the buffer. It reports whether the line was kept; a
+// rejected line increments the dropped counter instead of growing the buffer.
+//
+// The per-span cap is enforced here, at capture time, so one span cannot hold
+// unbounded memory however much it logs. Once the buffer holds maxLines, only
+// error lines are still taken: a span that emits five hundred info lines and
+// then fails still records the error that explains it. Refused lines are
+// counted on DroppedByCap.
 func (s *SpanLogs) append(line LogLine) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.maxLines > 0 && len(s.lines) >= s.maxLines && line.Level < slog.LevelError {
+		return false
+	}
 	s.lines = append(s.lines, line)
 	return true
 }
@@ -152,6 +165,9 @@ func LogsDroppedOutsideSpan() uint64 {
 // (VELWATCH_LOG_CAPTURE is not "true") or when ctx carries no trace context,
 // so callers pay nothing for it in the default configuration.
 //
+// The buffer holds at most VELWATCH_LOG_MAX_LINES lines, plus any error lines
+// emitted after that ceiling is reached.
+//
 // Middleware calls this for every instrumented request. Call it directly at
 // the top of a job or console command to capture the log lines it produces.
 func StartSpanLogs(ctx context.Context) (context.Context, *SpanLogs) {
@@ -163,7 +179,12 @@ func StartSpanLogs(ctx context.Context) (context.Context, *SpanLogs) {
 	if traceID == "" && spanID == "" {
 		return ctx, nil
 	}
-	logs := &SpanLogs{traceID: traceID, spanID: spanID, parentID: GetParentID(ctx)}
+	logs := &SpanLogs{
+		traceID:  traceID,
+		spanID:   spanID,
+		parentID: GetParentID(ctx),
+		maxLines: int(logMaxLines.Load()),
+	}
 	return context.WithValue(ctx, spanLogsKey{}, logs), logs
 }
 

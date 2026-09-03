@@ -50,10 +50,10 @@ func autoBoot(s *app.Services) error {
 // velocity.New() loads .env before boot hooks run, so values from the
 // application's .env file are visible here.
 //
-// A malformed VELWATCH_LOG_SLOW_THRESHOLD is an error rather than a silent
-// fallback: it decides which log lines a span keeps, so a typo there would
-// quietly change what the service ships. The older numeric variables keep
-// their historical lenient parsing.
+// A malformed VELWATCH_LOG_SLOW_THRESHOLD or VELWATCH_LOG_MAX_LINES is an
+// error rather than a silent fallback: they decide which log lines a span
+// keeps, so a typo there would quietly change what the service ships. The
+// older numeric variables keep their historical lenient parsing.
 func configFromEnv() (Config, error) {
 	cfg := Config{
 		// Left empty when unset: the default depends on the protocol and is
@@ -80,6 +80,18 @@ func configFromEnv() (Config, error) {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.FlushInterval = d
 		}
+	}
+	if v := os.Getenv("VELWATCH_LOG_MAX_LINES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_LINES %q is not a valid integer "+
+				"(want a positive count such as \"50\")", v)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_LINES %q must be a positive integer "+
+				"(the cap cannot be disabled; raise it instead)", v)
+		}
+		cfg.LogMaxLines = n
 	}
 	if v := os.Getenv("VELWATCH_LOG_SLOW_THRESHOLD"); v != "" {
 		d, err := time.ParseDuration(v)

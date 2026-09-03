@@ -29,6 +29,8 @@
 //	VELWATCH_LOG_SLOW_THRESHOLD
 //	                        a span at least this slow keeps every line it
 //	                        logged, e.g. "750ms" (default "1s")
+//	VELWATCH_LOG_MAX_LINES  log lines one span buffers before only error
+//	                        lines are still captured (default 50)
 //	VELWATCH_RELEASE        deployed service version (OTLP service.version)
 //	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
 //
@@ -135,12 +137,26 @@ type Config struct {
 	// application's own logging keeps working.
 	LogCapture bool
 
+	// LogMaxLines is the most log lines one span will buffer. Once a span
+	// reaches it, only error lines are still captured, so a span that logs
+	// heavily and then fails still records the failure. Lines refused by the
+	// cap are counted on SpanLogs.DroppedByCap and reported on the span's
+	// record as "log.dropped". Zero selects the default of 50; a negative
+	// value is rejected by initialization. Resolved from
+	// VELWATCH_LOG_MAX_LINES, which must be a positive integer.
+	LogMaxLines int
+
 	// LogSlowThreshold is the duration above which a span is considered slow
 	// and keeps every line it logged, whatever the trace's sampling verdict.
 	// Zero selects the default of one second; a negative value is rejected
 	// by initialization. Resolved from VELWATCH_LOG_SLOW_THRESHOLD.
 	LogSlowThreshold time.Duration
 }
+
+// defaultLogMaxLines is the number of log lines one span buffers before only
+// error lines are still taken. Fifty lines is a generous request-sized story
+// while keeping the worst case a span can hold small and predictable.
+const defaultLogMaxLines = 50
 
 // defaultLogSlowThreshold is the span duration above which log capture keeps
 // every buffered line. Healthy traffic is fast, so this is the line between
@@ -204,6 +220,12 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	}
 	if config.SampleRate <= 0 || config.SampleRate > 1 {
 		config.SampleRate = 1.0
+	}
+	if config.LogMaxLines < 0 {
+		return fmt.Errorf("velwatch: LogMaxLines must not be negative, got %d", config.LogMaxLines)
+	}
+	if config.LogMaxLines == 0 {
+		config.LogMaxLines = defaultLogMaxLines
 	}
 	if config.LogSlowThreshold < 0 {
 		return fmt.Errorf("velwatch: LogSlowThreshold must not be negative, got %s", config.LogSlowThreshold)
@@ -275,7 +297,7 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	// Install log capture last, so a failed initialization never leaves a
 	// handler wired into the application's logger.
 	if config.LogCapture {
-		sdk.logs = installLogCapture()
+		sdk.logs = installLogCapture(config)
 	}
 
 	instance = sdk

@@ -206,6 +206,11 @@ var (
 	// logCaptureOn mirrors installedLogHandler for lock-free reads on the
 	// request path.
 	logCaptureOn atomic.Bool
+
+	// logMaxLines mirrors the resolved Config.LogMaxLines so StartSpanLogs
+	// can stamp the ceiling on a new buffer without taking a lock on the
+	// request path. Zero means no cap.
+	logMaxLines atomic.Int64
 )
 
 // logCaptureEnabled reports whether log capture is installed.
@@ -231,12 +236,18 @@ func LogHandler() slog.Handler {
 // handler and installs the result as the new default. The application's own
 // logging keeps working: every record is forwarded to the previous handler.
 // Installing twice is a no-op and returns the handler already installed.
-func installLogCapture() *logHandler {
+//
+// config is the resolved configuration, so the capture limits it carries are
+// already defaulted; a zero LogMaxLines here means no cap rather than "use
+// the default", which initialization has applied by this point.
+func installLogCapture(config Config) *logHandler {
 	logInstallMu.Lock()
 	defer logInstallMu.Unlock()
 	if installedLogHandler != nil {
 		return installedLogHandler
 	}
+
+	logMaxLines.Store(int64(config.LogMaxLines))
 
 	previous := slog.Default()
 	handler := newLogHandler(previous.Handler())
@@ -256,6 +267,7 @@ func uninstallLogCapture() {
 		return
 	}
 	logCaptureOn.Store(false)
+	logMaxLines.Store(0)
 	installedLogHandler = nil
 	if previousDefaultLogger != nil {
 		slog.SetDefault(previousDefaultLogger)
