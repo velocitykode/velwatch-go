@@ -165,7 +165,9 @@ defer span.End()
 
 ### HTTP Middleware
 
-For explicit HTTP instrumentation:
+For a plain `net/http` server with no Velocity router. A Velocity app does not
+need it: the router's own request events carry the trace, and the SDK records
+them, log lines included.
 
 ```go
 mux := http.NewServeMux()
@@ -234,20 +236,41 @@ span are dropped. Left unset, `slog` is untouched. Applications that build
 their own logger can wrap the handler themselves with `velwatch.LogHandler()`,
 which returns `nil` when capture is off.
 
+A span is active when the line's context carries a trace id, so pass the
+context you were given: `slog.InfoContext(ctx, ...)`, or a logger that has it.
+In a Velocity app that is all there is to do. The router, the queue worker
+and the scheduler put the trace on their contexts, the handler buffers each
+line on that span, and the SDK's event listeners close the buffer when the
+framework reports the request, job or task ended, with its status code or
+error and its real duration. Requests, jobs and scheduled tasks are covered
+with no code beyond the blank import and the variable.
+
 When the span ends, its buffered lines are queued as `log` records carrying
 the trace, span and parent ids of that span, so they are batched and flushed
 alongside it. Each record holds the message, the lowercase level, its OTLP
 severity number and the line attributes flattened to dotted keys
 (`db.query.table`); its timestamp is the one `slog` stamped on the record, not
-the flush time. `Middleware` brackets every request itself. A job, a console
-command or any other span does the same in two lines:
+the flush time.
+
+Outside the framework, whoever opens a span closes it. `Middleware` brackets
+every request of a plain `net/http` server itself. A console command or any
+other hand-rolled span does the same in two lines:
 
 ```go
 ctx, logs := velwatch.StartSpanLogs(ctx)
 defer velwatch.RecordSpanLogs(logs)
 ```
 
-Both calls are no-ops while log capture is off.
+Both calls are no-ops while log capture is off. A buffer bound to the context
+this way always wins over the framework path, so a Velocity app that also
+wraps its handler in `Middleware` ships each line once.
+
+A span the SDK never sees end (a line logged after the request finished, a
+job longer than ten minutes, a trace id with no matching framework event) is
+recorded after ten minutes with no outcome, so it still ships what the keep
+rules allow and never leaks. At most 4096 such framework spans hold open
+buffers at once; lines past that are dropped and counted on
+`velwatch.LogsDroppedSpanLimit()`.
 
 Which of the buffered lines are actually sent is decided when the span ends,
 so healthy traffic ships almost nothing:
@@ -263,8 +286,9 @@ so healthy traffic ships almost nothing:
 
 Discarded lines are counted on `SpanLogs.DroppedByKeepRule()`, which
 `SpanLogs.Dropped()` reports together with the lines the cap and the level
-floor refused. `Middleware` passes the real status and duration itself. Tell
-the buffer how any other span ended before recording it:
+floor refused. The framework listeners and `Middleware` pass the real status
+and duration themselves. Tell the buffer how a hand-rolled span ended before
+recording it:
 
 ```go
 logs.SetOutcome(velwatch.SpanOutcome{Failed: err != nil, Duration: time.Since(start)})
@@ -292,7 +316,7 @@ Both are applied at capture time, before the keep rules above, and an invalid
 value for either fails initialization with an error naming the variable.
 Refused lines are counted on `SpanLogs.DroppedByFloor()` and
 `SpanLogs.DroppedByCap()`; `SpanLogs.DroppedAtCapture()` reports their sum,
-which `Middleware` attaches to every request record as the `log.dropped`
+which the SDK attaches to the request, job or task record as the `log.dropped`
 attribute when it is above zero. Reading it from the request keeps the gap
 visible even when a span had every line dropped and shipped no log record at
 all.

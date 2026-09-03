@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
-// Middleware returns an HTTP middleware that automatically instruments requests.
-// This is useful when you need explicit control over instrumentation.
+// Middleware returns an HTTP middleware that automatically instruments requests
+// for a plain net/http server. A velocity application does not need it: the
+// router's own request events carry the trace, and the SDK's listeners record
+// them, log lines included.
 //
 // Usage:
 //

@@ -30,12 +30,18 @@ type SpanOutcome struct {
 //
 // Middleware does this for every instrumented request. It is a no-op on a nil
 // buffer, so a caller need not check whether log capture is on.
+//
+// A span already marked failed (MarkFailed) stays failed whatever outcome
+// says: a recorded exception is a fact about the span, and the status code
+// the caller derived Failed from may well be a tidy 200 rendered after the
+// error was handled.
 func (s *SpanLogs) SetOutcome(outcome SpanOutcome) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	outcome.Failed = outcome.Failed || s.outcome.Failed
 	s.outcome = outcome
 }
 

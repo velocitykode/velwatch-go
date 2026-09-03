@@ -69,6 +69,12 @@ func (h *logHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 // Handle forwards the record to the wrapped handler, then buffers it on the
 // span active on ctx.
+//
+// The buffer is the one bound to ctx when there is one (Middleware, or an
+// explicit StartSpanLogs). Otherwise, when ctx carries a trace id the
+// framework put there, the line opens or joins the span's buffer in the
+// registry, which the framework event listeners close when the span ends.
+// A line with neither is dropped and counted in LogsDroppedOutsideSpan.
 func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 	var err error
 	if h.next != nil && h.next.Enabled(ctx, r.Level) {
@@ -78,6 +84,9 @@ func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	logs := SpanLogsFrom(ctx)
+	if logs == nil {
+		logs = activeSpanLogs.attach(ctx)
+	}
 	if logs == nil {
 		logsDroppedOutsideSpan.Add(1)
 		return err
@@ -293,6 +302,7 @@ func uninstallLogCapture() {
 	logCaptureOn.Store(false)
 	logMaxLines.Store(0)
 	installedLogHandler = nil
+	activeSpanLogs.reset()
 	if previousDefaultLogger != nil {
 		slog.SetDefault(previousDefaultLogger)
 		previousDefaultLogger = nil
