@@ -35,8 +35,9 @@ type LogLine struct {
 // It is safe for concurrent use: a handler may be called from several
 // goroutines running under the same span.
 type SpanLogs struct {
-	traceID string
-	spanID  string
+	traceID  string
+	spanID   string
+	parentID string
 
 	mu      sync.Mutex
 	lines   []LogLine
@@ -48,6 +49,10 @@ func (s *SpanLogs) TraceID() string { return s.traceID }
 
 // SpanID returns the span this buffer belongs to.
 func (s *SpanLogs) SpanID() string { return s.spanID }
+
+// ParentID returns the parent of the span this buffer belongs to, empty when
+// the span is the root of its trace.
+func (s *SpanLogs) ParentID() string { return s.parentID }
 
 // append adds a line to the buffer. It reports whether the line was kept.
 // Keep rules and a per-span cap hook in here: a rejected line increments the
@@ -123,7 +128,7 @@ func StartSpanLogs(ctx context.Context) (context.Context, *SpanLogs) {
 	if traceID == "" && spanID == "" {
 		return ctx, nil
 	}
-	logs := &SpanLogs{traceID: traceID, spanID: spanID}
+	logs := &SpanLogs{traceID: traceID, spanID: spanID, parentID: GetParentID(ctx)}
 	return context.WithValue(ctx, spanLogsKey{}, logs), logs
 }
 

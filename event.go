@@ -23,6 +23,11 @@ const (
 	EventTypeOutgoingRequest = "outgoing_request"
 	EventTypeMail            = "mail"
 	EventTypeScheduledTask   = "scheduled_task"
+
+	// EventTypeLog is one log line captured while a span was active. It
+	// carries the ids of that span, so the platform can show a request
+	// next to the lines it logged.
+	EventTypeLog = "log"
 )
 
 // Event represents a single instrumentation event
@@ -122,6 +127,35 @@ func NewScheduledTaskEvent(taskName, status string, durationMs float64) *Event {
 	e.Attributes["task_name"] = taskName
 	e.Attributes["status"] = status
 	e.Attributes["duration_ms"] = durationMs
+	return e
+}
+
+// NewLogEvent creates a log event from a captured log line. The event
+// timestamp is the timestamp slog stamped on the record, not the time of the
+// conversion, so a line keeps its own position on the trace timeline however
+// long it waits in a buffer. A line with no timestamp of its own falls back to
+// the time the event is built.
+//
+// The line's flattened attributes ride as event attributes under their dotted
+// keys, alongside the reserved message, level and severity_number keys. A line
+// attribute named after one of those three is overwritten by it.
+//
+// The caller supplies the span ids; SpanLogs.Events does that for a whole
+// buffer at once.
+func NewLogEvent(line LogLine) *Event {
+	e := NewEvent(EventTypeLog)
+	if !line.Time.IsZero() {
+		e.Timestamp = line.Time
+	}
+	for key, value := range line.Attrs {
+		if key == "" {
+			continue
+		}
+		e.Attributes[key] = value
+	}
+	e.Attributes["message"] = line.Message
+	e.Attributes["level"] = logLevelName(line.Level)
+	e.Attributes["severity_number"] = logSeverityNumber(line.Level)
 	return e
 }
 
