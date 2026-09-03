@@ -223,6 +223,8 @@ VELWATCH_INSECURE=true           # Disable TLS (local dev)
 VELWATCH_DISABLED=true           # Disable the SDK entirely
 VELWATCH_LOG_CAPTURE=true        # Capture log lines emitted during a span (default off)
 VELWATCH_LOG_SLOW_THRESHOLD=1s   # A span slower than this keeps every line it logged
+VELWATCH_LOG_LEVEL=info          # Lowest level captured: debug|info|warn|error (default info)
+VELWATCH_LOG_MAX_LINES=50        # Log lines one span buffers before only errors are kept (default 50)
 ```
 
 With `VELWATCH_LOG_CAPTURE=true` the SDK wraps the current `slog` default
@@ -260,14 +262,39 @@ so healthy traffic ships almost nothing:
    span of a trace agrees and the ingest service reaches the same answer.
 
 Discarded lines are counted on `SpanLogs.DroppedByKeepRule()`, which
-`SpanLogs.Dropped()` reports together with any lines a per-span cap refused.
-`Middleware` passes the real status and duration itself. Tell the buffer how
-any other span ended before recording it:
+`SpanLogs.Dropped()` reports together with the lines the cap and the level
+floor refused. `Middleware` passes the real status and duration itself. Tell
+the buffer how any other span ended before recording it:
 
 ```go
 logs.SetOutcome(velwatch.SpanOutcome{Failed: err != nil, Duration: time.Since(start)})
 velwatch.RecordSpanLogs(logs)
 ```
+
+### What one span may capture
+
+Two limits bound what a single span can produce before any of it reaches the
+buffer, so a request that logs in a loop cannot hold unbounded memory:
+
+- `VELWATCH_LOG_LEVEL` (default `info`, one of `debug`, `info`, `warn`,
+  `error`, case-insensitive) is the lowest level captured. Debug lines are not
+  buffered unless you set `VELWATCH_LOG_LEVEL=debug`. The floor governs
+  capture only: every record is still handed to the application's own `slog`
+  handler, so what the application logs never changes.
+- `VELWATCH_LOG_MAX_LINES` (default `50`) is the most lines one span buffers.
+  Past the ceiling only error lines are still taken, so a span that emits five
+  hundred info lines and then fails still records the error that explains it.
+  The cap must be a positive integer and cannot be switched off; raise it
+  instead.
+
+Both are applied at capture time, before the keep rules above, and an invalid
+value for either fails initialization with an error naming the variable.
+Refused lines are counted on `SpanLogs.DroppedByFloor()` and
+`SpanLogs.DroppedByCap()`; `SpanLogs.DroppedAtCapture()` reports their sum,
+which `Middleware` attaches to every request record as the `log.dropped`
+attribute when it is above zero. Reading it from the request keeps the gap
+visible even when a span had every line dropped and shipped no log record at
+all.
 
 Captured lines are exported as OTLP `LogRecord`s over the same connection as
 the spans they belong to, on both `otlp` (the `LogsService` on the trace gRPC
