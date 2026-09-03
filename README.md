@@ -54,7 +54,7 @@ defer velwatch.Shutdown()
 | `Endpoint` | string | per protocol | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP); defaults to `localhost:4317` for `otlp`, `localhost:4318` for `otlphttp`, `localhost:50051` for `grpc` |
 | `Token` | string | required | Project API token (vw_xxx), sent as a Bearer token |
 | `ServiceName` | string | required | Service name for identification |
-| `Protocol` | string | `otlp` | Wire protocol: `otlp`, `otlphttp`, or `grpc` (deprecated) |
+| `Protocol` | string | `otlp` | Wire protocol: `otlp` or `otlphttp` |
 | `BatchSize` | int | 100 | Events to batch before sending |
 | `FlushInterval` | time.Duration | 1s | How often to flush batched events |
 | `Insecure` | bool | false | Disable TLS (for local dev) |
@@ -63,7 +63,7 @@ defer velwatch.Shutdown()
 
 ## Wire Protocols
 
-The SDK ships events over one of three wires, selected by `Protocol`
+The SDK ships events over one of two wires, selected by `Protocol`
 (`VELWATCH_PROTOCOL`). All authenticate with the project token as
 `Authorization: Bearer <token>`.
 
@@ -71,7 +71,6 @@ The SDK ships events over one of three wires, selected by `Protocol`
 |------------|------|-----|
 | `otlp` (default) | OpenTelemetry OTLP/gRPC (port 4317) | Backend services |
 | `otlphttp` | OpenTelemetry OTLP/HTTP (`application/x-protobuf`, port 4318) | Browser, serverless, edge, mobile runtimes |
-| `grpc` | Legacy Velwatch `EventService` proto (port 50051) | Deprecated; existing deployments only |
 
 The OTLP exporters map events onto OpenTelemetry spans following OTel semantic
 conventions (`http.*`, `db.*`, `messaging.*`, and `exception.*` span events),
@@ -97,23 +96,20 @@ standard receiver port when `VELWATCH_ENDPOINT` is left unset:
 |---------------------|-----------------------------|
 | `otlp` (default)    | `localhost:4317`            |
 | `otlphttp`          | `localhost:4318`            |
-| `grpc` (deprecated) | `localhost:50051`           |
 
-To keep the deprecated legacy `EventService` wire, opt back in explicitly and
-point the endpoint at its port:
+### The first-party ingest wire is gone
 
-```bash
-VELWATCH_PROTOCOL=grpc
-VELWATCH_ENDPOINT=velwatch.example.com:50051
-```
+Earlier versions shipped a first-party gRPC wire selected with
+`VELWATCH_PROTOCOL=grpc` and served on port `50051`. It has been removed, and
+the server no longer accepts it. `VELWATCH_PROTOCOL=grpc` now fails
+initialization with an error naming the replacement.
 
-The legacy wire logs a deprecation warning once per process on startup and will
-is scheduled for removal in the next major version.
+To migrate, set `VELWATCH_PROTOCOL=otlp` (or leave it unset, since OTLP is the
+default) and point `VELWATCH_ENDPOINT` at the OTLP receiver on port `4317`. No
+code change is required.
 
-Because the default flipped, an endpoint on the legacy port `50051` paired with
-an OTLP protocol is rejected at initialization with an explicit error instead of
-failing silently at export time. Either move the endpoint to the OTLP receiver
-port or set `VELWATCH_PROTOCOL=grpc`.
+An endpoint left on port `50051` is rejected at initialization with an explicit
+error rather than failing silently at export time.
 
 ## Automatic Instrumentation
 
@@ -216,9 +212,9 @@ The SDK respects the following environment variables:
 
 ```bash
 VELWATCH_TOKEN=vw_xxx            # Project API token (unset = SDK dormant)
-VELWATCH_ENDPOINT=host:port      # Ingest endpoint (default per protocol: 4317 otlp, 4318 otlphttp, 50051 grpc)
+VELWATCH_ENDPOINT=host:port      # Ingest endpoint (default per protocol: 4317 otlp, 4318 otlphttp)
 VELWATCH_SERVICE_NAME=my-api     # Service name (default APP_NAME)
-VELWATCH_PROTOCOL=otlp           # Wire protocol: otlp (default) | otlphttp | grpc (deprecated)
+VELWATCH_PROTOCOL=otlp           # Wire protocol: otlp (default) | otlphttp
 VELWATCH_SAMPLE_RATE=0.5         # Sample rate (0.0-1.0)
 VELWATCH_BATCH_SIZE=100          # Events per batch
 VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
