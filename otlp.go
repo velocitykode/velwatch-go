@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
@@ -54,6 +55,7 @@ var flatTagKeys = map[string]bool{
 type OTLPExporter struct {
 	conn        *grpc.ClientConn
 	client      coltracepb.TraceServiceClient
+	logsClient  collogspb.LogsServiceClient
 	token       string
 	serviceName string
 	release     string
@@ -77,33 +79,70 @@ func NewOTLPExporter(endpoint, token, serviceName string, insecureMode bool) (*O
 		return nil, fmt.Errorf("velwatch: failed to connect to OTLP endpoint: %w", err)
 	}
 
+	// Both signals ride the one connection: logs are a second service on
+	// the same OTLP endpoint, not a second dial.
 	return &OTLPExporter{
 		conn:        conn,
 		client:      coltracepb.NewTraceServiceClient(conn),
+		logsClient:  collogspb.NewLogsServiceClient(conn),
 		token:       token,
 		serviceName: serviceName,
 	}, nil
 }
 
-// Export converts events to OTLP spans and sends them in one ExportTraceService
-// request over gRPC.
+// Export converts events to OTLP spans and sends them over gRPC, one
+// ExportTraceService request per batch of at most maxRecordsPerExport spans.
 func (e *OTLPExporter) Export(events []*Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	req := buildExportRequest(events, e.serviceName, e.release, e.commitSHA)
+	var firstErr error
+	for _, chunk := range chunkEvents(events, maxRecordsPerExport) {
+		ctx, cancel := e.exportContext()
+		_, err := e.client.Export(ctx, buildExportRequest(chunk, e.serviceName, e.release, e.commitSHA))
+		cancel()
+		if err != nil {
+			log.Printf("velwatch: failed to export OTLP spans: %v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
 
+// ExportLogRecords converts log events to OTLP log records and sends them over
+// the same gRPC connection as spans, one ExportLogsService request per batch of
+// at most maxRecordsPerExport records. It satisfies LogRecordExporter, which is
+// what makes the collector route captured log lines here instead of counting
+// them dropped.
+func (e *OTLPExporter) ExportLogRecords(events []*Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	var firstErr error
+	for _, chunk := range chunkEvents(events, maxRecordsPerExport) {
+		ctx, cancel := e.exportContext()
+		_, err := e.logsClient.Export(ctx, buildExportLogsRequest(chunk, e.serviceName, e.release, e.commitSHA))
+		cancel()
+		if err != nil {
+			log.Printf("velwatch: failed to export OTLP log records: %v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// exportContext builds the per-request context both signals send under: the
+// Bearer token in gRPC metadata and the export deadline.
+func (e *OTLPExporter) exportContext() (context.Context, context.CancelFunc) {
 	ctx := metadata.AppendToOutgoingContext(context.Background(),
 		"authorization", "Bearer "+e.token)
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	if _, err := e.client.Export(ctx, req); err != nil {
-		log.Printf("velwatch: failed to export OTLP spans: %v", err)
-		return err
-	}
-	return nil
+	return context.WithTimeout(ctx, 30*time.Second)
 }
 
 // buildExportRequest assembles events into a single OTLP ExportTraceService

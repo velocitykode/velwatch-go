@@ -8,6 +8,8 @@ import "sync/atomic"
 //	*OTLPExporter      - OpenTelemetry OTLP/gRPC (the default wire)
 //	*OTLPHTTPExporter  - OpenTelemetry OTLP/HTTP (protobuf over POST /v1/traces)
 //
+// Both ship log records too: see LogRecordExporter.
+//
 // A new wire protocol is added by implementing this interface; no collector,
 // listener, or SDK lifecycle code changes.
 type Exporter interface {
@@ -44,6 +46,32 @@ var logRecordsDropped atomic.Uint64
 // exporter that implements LogRecordExporter.
 func LogRecordsDropped() uint64 {
 	return logRecordsDropped.Load()
+}
+
+// maxRecordsPerExport caps how many records ride in one OTLP export request.
+// The receiver rejects a request carrying more, so an exporter splits a larger
+// batch into several requests rather than losing it. It applies per signal: up
+// to this many spans in one trace request, up to this many log records in one
+// logs request.
+const maxRecordsPerExport = 2048
+
+// chunkEvents splits events into consecutive slices of at most size elements,
+// preserving order. A batch already within the limit is returned as a single
+// chunk that aliases the input, so the common case allocates one slice header
+// and copies nothing.
+func chunkEvents(events []*Event, size int) [][]*Event {
+	if size <= 0 || len(events) <= size {
+		return [][]*Event{events}
+	}
+	chunks := make([][]*Event, 0, (len(events)+size-1)/size)
+	for start := 0; start < len(events); start += size {
+		end := start + size
+		if end > len(events) {
+			end = len(events)
+		}
+		chunks = append(chunks, events[start:end])
+	}
+	return chunks
 }
 
 // splitLogEvents partitions a batch into span events and log records, keeping
