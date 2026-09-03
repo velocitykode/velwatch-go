@@ -246,6 +246,12 @@ defer velwatch.RecordSpanLogs(logs)
 
 Both calls are no-ops while log capture is off.
 
+Captured lines are exported as OTLP `LogRecord`s over the same connection as
+the spans they belong to, on both `otlp` (the `LogsService` on the trace gRPC
+connection) and `otlphttp` (`POST /v1/logs` beside `/v1/traces`), grouped under
+the same resource so a request and its log lines agree on `service.name` and
+`service.version`.
+
 ## Testing
 
 Disable the SDK during tests by leaving `VELWATCH_TOKEN` unset (the SDK stays
