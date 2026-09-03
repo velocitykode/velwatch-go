@@ -26,6 +26,9 @@
 //	VELWATCH_DISABLED       "true" disables the SDK entirely
 //	VELWATCH_LOG_CAPTURE    "true" captures log lines emitted during a span
 //	                        (default off: slog is left untouched)
+//	VELWATCH_LOG_SLOW_THRESHOLD
+//	                        a span at least this slow keeps every line it
+//	                        logged, e.g. "750ms" (default "1s")
 //	VELWATCH_RELEASE        deployed service version (OTLP service.version)
 //	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
 //
@@ -131,7 +134,18 @@ type Config struct {
 	// current slog default handler is wrapped rather than replaced, so the
 	// application's own logging keeps working.
 	LogCapture bool
+
+	// LogSlowThreshold is the duration above which a span is considered slow
+	// and keeps every line it logged, whatever the trace's sampling verdict.
+	// Zero selects the default of one second; a negative value is rejected
+	// by initialization. Resolved from VELWATCH_LOG_SLOW_THRESHOLD.
+	LogSlowThreshold time.Duration
 }
+
+// defaultLogSlowThreshold is the span duration above which log capture keeps
+// every buffered line. Healthy traffic is fast, so this is the line between
+// "nothing interesting happened" and "worth the bytes".
+const defaultLogSlowThreshold = time.Second
 
 var (
 	instance *SDK
@@ -190,6 +204,12 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	}
 	if config.SampleRate <= 0 || config.SampleRate > 1 {
 		config.SampleRate = 1.0
+	}
+	if config.LogSlowThreshold < 0 {
+		return fmt.Errorf("velwatch: LogSlowThreshold must not be negative, got %s", config.LogSlowThreshold)
+	}
+	if config.LogSlowThreshold == 0 {
+		config.LogSlowThreshold = defaultLogSlowThreshold
 	}
 	if config.Protocol == "" {
 		config.Protocol = protocolOTLP

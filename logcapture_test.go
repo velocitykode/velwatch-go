@@ -388,19 +388,28 @@ func TestMiddlewareCapturesRequestLogs(t *testing.T) {
 }
 
 func TestConfigFromEnvLogCapture(t *testing.T) {
-	if cfg := configFromEnv(); cfg.LogCapture {
+	envConfig := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := configFromEnv()
+		if err != nil {
+			t.Fatalf("configFromEnv returned error: %v", err)
+		}
+		return cfg
+	}
+
+	if envConfig(t).LogCapture {
 		t.Error("LogCapture = true with VELWATCH_LOG_CAPTURE unset, want false")
 	}
 
 	t.Setenv("VELWATCH_LOG_CAPTURE", "true")
-	if cfg := configFromEnv(); !cfg.LogCapture {
+	if !envConfig(t).LogCapture {
 		t.Error("LogCapture = false with VELWATCH_LOG_CAPTURE=true, want true")
 	}
 
 	if err := os.Setenv("VELWATCH_LOG_CAPTURE", "1"); err != nil {
 		t.Fatalf("Setenv returned error: %v", err)
 	}
-	if cfg := configFromEnv(); cfg.LogCapture {
+	if envConfig(t).LogCapture {
 		t.Error(`LogCapture = true with VELWATCH_LOG_CAPTURE=1, want false (only "true" enables it)`)
 	}
 }

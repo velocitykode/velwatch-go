@@ -1,6 +1,7 @@
 package velwatch
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -20,7 +21,10 @@ func init() {
 // app's event dispatcher, then registers the SDK as an app component so
 // App.Shutdown's ShutdownAware sweep flushes and closes it.
 func autoBoot(s *app.Services) error {
-	cfg := configFromEnv()
+	cfg, err := configFromEnv()
+	if err != nil {
+		return err
+	}
 	if cfg.Token == "" || cfg.Disabled {
 		return nil // unconfigured or explicitly off: stay dormant
 	}
@@ -32,7 +36,7 @@ func autoBoot(s *app.Services) error {
 		mu.Unlock()
 		return nil
 	}
-	err := initLocked(s.Events, cfg)
+	err = initLocked(s.Events, cfg)
 	sdk := instance
 	mu.Unlock()
 	if err != nil {
@@ -45,7 +49,12 @@ func autoBoot(s *app.Services) error {
 // configFromEnv builds a Config from VELWATCH_* environment variables.
 // velocity.New() loads .env before boot hooks run, so values from the
 // application's .env file are visible here.
-func configFromEnv() Config {
+//
+// A malformed VELWATCH_LOG_SLOW_THRESHOLD is an error rather than a silent
+// fallback: it decides which log lines a span keeps, so a typo there would
+// quietly change what the service ships. The older numeric variables keep
+// their historical lenient parsing.
+func configFromEnv() (Config, error) {
 	cfg := Config{
 		// Left empty when unset: the default depends on the protocol and is
 		// applied during initialization, once the protocol is resolved.
@@ -72,7 +81,18 @@ func configFromEnv() Config {
 			cfg.FlushInterval = d
 		}
 	}
-	return cfg
+	if v := os.Getenv("VELWATCH_LOG_SLOW_THRESHOLD"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_SLOW_THRESHOLD %q is not a valid duration "+
+				"(want a Go duration such as \"750ms\" or \"2s\")", v)
+		}
+		if d < 0 {
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_SLOW_THRESHOLD %q must not be negative", v)
+		}
+		cfg.LogSlowThreshold = d
+	}
+	return cfg, nil
 }
 
 func envOr(key, fallback string) string {

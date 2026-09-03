@@ -138,7 +138,10 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		t.Setenv(k, "")
 	}
 
-	cfg := configFromEnv()
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv returned error: %v", err)
+	}
 	// The endpoint default is per-protocol, so configFromEnv leaves it empty
 	// and initialization fills it in once the protocol is resolved.
 	if cfg.Endpoint != "" {
