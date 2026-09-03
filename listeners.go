@@ -3,8 +3,6 @@ package velwatch
 import (
 	"context"
 	"math/rand"
-	"net/http"
-	"time"
 
 	"github.com/velocitykode/velocity/cache"
 	"github.com/velocitykode/velocity/contract"
@@ -193,15 +191,6 @@ func (l *Listeners) shouldSample() bool {
 func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
 
-	// Close the log buffer this request's lines opened in the registry,
-	// with the status and duration the request actually had. This runs
-	// before the sampling draw below: the keep rules do their own, and a
-	// failed request keeps its lines whether or not its record is sampled.
-	spanLogs := endFrameworkSpanLogs(traceID, spanID, SpanOutcome{
-		Failed:   e.StatusCode >= http.StatusInternalServerError,
-		Duration: e.Duration,
-	})
-
 	if !l.shouldSample() {
 		return nil
 	}
@@ -224,10 +213,6 @@ func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
 	event.Tags["route"] = e.Route
 	event.Attributes["bytes_written"] = e.BytesWritten
 	event.Attributes["request_id"] = e.RequestID
-	if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-		event.Attributes["log.dropped"] = dropped
-	}
-
 	l.collector.Add(event)
 	return nil
 }
@@ -258,18 +243,7 @@ func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
 		return nil
 	}
 
-	// A failed request keeps every log line it wrote, whether or not this
-	// exception event itself is sampled: the keep rules read the outcome when
-	// the span ends, and the status code alone cannot tell, since a handler
-	// error may well have been rendered as a tidy 4xx page. The buffer is
-	// the context-bound one for a Middleware request, else the registered
-	// one for a velocity request.
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-	if logs := SpanLogsFrom(e.Context); logs != nil {
-		logs.MarkFailed()
-	} else {
-		activeSpanLogs.lookup(traceID, spanID).MarkFailed()
-	}
 
 	if !l.shouldSample() {
 		return nil
@@ -472,12 +446,7 @@ func (l *Listeners) onJobProcessing(e *queue.JobProcessing) error {
 }
 
 func (l *Listeners) onJobProcessed(e *queue.JobProcessed) error {
-	// Close the log buffer the job's lines opened, before the sampling
-	// draw: the keep rules decide on their own.
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-	spanLogs := endFrameworkSpanLogs(traceID, spanID, SpanOutcome{
-		Duration: time.Duration(e.DurationMs) * time.Millisecond,
-	})
 
 	if !l.shouldSample() {
 		return nil
@@ -499,22 +468,12 @@ func (l *Listeners) onJobProcessed(e *queue.JobProcessed) error {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
-	if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-		event.Attributes["log.dropped"] = dropped
-	}
-
 	l.collector.Add(event)
 	return nil
 }
 
 func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
-	// A failed job keeps every line it logged; close its buffer before the
-	// sampling draw so that holds whether or not the job record is sampled.
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-	spanLogs := endFrameworkSpanLogs(traceID, spanID, SpanOutcome{
-		Failed:   true,
-		Duration: time.Duration(e.DurationMs) * time.Millisecond,
-	})
 
 	if !l.shouldSample() {
 		return nil
@@ -537,10 +496,6 @@ func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
 	}
 	event.Tags["service"] = l.serviceName
 	event.Attributes["error"] = e.Error
-	if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-		event.Attributes["log.dropped"] = dropped
-	}
-
 	l.collector.Add(event)
 	return nil
 }
@@ -674,9 +629,6 @@ func (l *Listeners) onScheduledTaskStarting(e *scheduler.ScheduledTaskStarting) 
 
 func (l *Listeners) onScheduledTaskFinished(e *scheduler.ScheduledTaskFinished) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-	spanLogs := endFrameworkSpanLogs(traceID, spanID, SpanOutcome{
-		Duration: time.Duration(e.DurationMs) * time.Millisecond,
-	})
 
 	if !l.shouldSample() {
 		return nil
@@ -698,20 +650,12 @@ func (l *Listeners) onScheduledTaskFinished(e *scheduler.ScheduledTaskFinished) 
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
-	if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-		event.Attributes["log.dropped"] = dropped
-	}
-
 	l.collector.Add(event)
 	return nil
 }
 
 func (l *Listeners) onScheduledTaskFailed(e *scheduler.ScheduledTaskFailed) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-	spanLogs := endFrameworkSpanLogs(traceID, spanID, SpanOutcome{
-		Failed:   true,
-		Duration: time.Duration(e.DurationMs) * time.Millisecond,
-	})
 
 	if !l.shouldSample() {
 		return nil
@@ -734,18 +678,12 @@ func (l *Listeners) onScheduledTaskFailed(e *scheduler.ScheduledTaskFailed) erro
 	}
 	event.Tags["service"] = l.serviceName
 	event.Attributes["error"] = e.Error
-	if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-		event.Attributes["log.dropped"] = dropped
-	}
-
 	l.collector.Add(event)
 	return nil
 }
 
-// RecordException manually records an exception event. It also marks the
-// span active on ctx as failed, whether its log buffer is bound to ctx or
-// registered for a framework span, so the lines buffered under it survive
-// the keep rules when the span ends (see SpanLogs.MarkFailed).
+// RecordException manually records an exception event on the span active on
+// ctx.
 func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	mu.Lock()
 	sdk := instance
@@ -754,8 +692,6 @@ func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	if sdk == nil || sdk.config.Disabled || sdk.collector == nil {
 		return
 	}
-
-	spanLogsForContext(ctx).MarkFailed()
 
 	event := NewExceptionEvent(errType, message, stackTrace)
 

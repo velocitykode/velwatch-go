@@ -1,6 +1,9 @@
 package velwatch
 
-import "log/slog"
+import (
+	"log/slog"
+	"time"
+)
 
 // OTLP severity numbers for the levels slog defines. OTLP groups severities
 // into ranges (debug 5-8, info 9-12, warn 13-16, error 17-20); a level maps to
@@ -11,6 +14,29 @@ const (
 	severityNumberWarn  = 13
 	severityNumberError = 17
 )
+
+// LogLine is a single log line on its way to Velwatch. It holds everything an
+// OTLP LogRecord needs: the time the line was written, its severity, the
+// message, and its key/value arguments flattened to dotted keys.
+//
+// A log line is traceless. It carries no trace, span or parent id, and is
+// searchable by service, level, message and time.
+type LogLine struct {
+	// Time is when the line was written. It can be the zero time when the
+	// caller built the line without one.
+	Time time.Time
+
+	// Level is the slog severity the line was written at. Velocity's log
+	// levels map onto the four slog defines; Fatal is recorded as error.
+	Level slog.Level
+
+	// Message is the log message.
+	Message string
+
+	// Attrs holds the line's key/value arguments flattened to dotted keys
+	// ("db.query.table"). It may be nil for a bare message.
+	Attrs map[string]any
+}
 
 // logLevelName returns the lowercase level name a log record is stored under.
 // A custom level (slog.LevelInfo+2 for a "notice", say) falls into the nearest
@@ -40,85 +66,5 @@ func logSeverityNumber(level slog.Level) int {
 		return severityNumberWarn
 	default:
 		return severityNumberError
-	}
-}
-
-// Events converts the buffered lines into log events, in capture order. Every
-// event carries the trace, span and parent ids of the span the lines were
-// emitted in, and keeps the timestamp slog stamped on the record.
-//
-// The buffer is left intact: converting it twice yields two equivalent sets of
-// events. A nil buffer converts to no events, so a caller need not check
-// whether log capture is on.
-func (s *SpanLogs) Events() []*Event {
-	if s == nil {
-		return nil
-	}
-	return s.eventsFrom(s.Lines())
-}
-
-// eventsFrom converts the given lines, which the caller has already taken
-// from this buffer and possibly filtered, into log events.
-func (s *SpanLogs) eventsFrom(lines []LogLine) []*Event {
-	if s == nil || len(lines) == 0 {
-		return nil
-	}
-
-	events := make([]*Event, 0, len(lines))
-	for _, line := range lines {
-		event := NewLogEvent(line)
-		event.TraceID = s.traceID
-		event.SpanID = s.spanID
-		if s.parentID != "" {
-			parentID := s.parentID
-			event.ParentID = &parentID
-		}
-		events = append(events, event)
-	}
-	return events
-}
-
-// RecordSpanLogs applies the keep rules to the lines buffered on logs and
-// queues the survivors as log records, so they are batched and flushed with
-// the span they belong to. Call it once, where the span ends:
-//
-//	ctx, logs := velwatch.StartSpanLogs(ctx)
-//	defer velwatch.RecordSpanLogs(logs)
-//
-// The decision is tail-based, so tell the buffer how the span ended first
-// (SpanLogs.SetOutcome) to get the failed and slow rules; without an outcome
-// a span is treated as healthy and fast. A failed or slow span keeps every
-// line, warn and above is always kept, and the rest survive only when the
-// trace is sampled. Discarded lines are counted on SpanLogs.DroppedByKeepRule.
-//
-// Middleware does this for every instrumented request, outcome included. A
-// job, a console command or any other span brackets itself the same way.
-//
-// It is a no-op on a nil buffer and while the SDK is dormant or disabled, so
-// the call costs nothing in a build that never turns log capture on.
-func RecordSpanLogs(logs *SpanLogs) {
-	if logs == nil {
-		return
-	}
-
-	mu.Lock()
-	sdk := instance
-	mu.Unlock()
-	if sdk == nil || sdk.config.Disabled || sdk.collector == nil {
-		return
-	}
-
-	lines := logs.Lines()
-	if len(lines) == 0 {
-		return
-	}
-
-	kept, dropped := applyKeepRules(lines, logs.Outcome(), logs.TraceID(),
-		sdk.config.LogSlowThreshold, sdk.config.SampleRate)
-	logs.dropByKeepRule(dropped)
-
-	for _, event := range logs.eventsFrom(kept) {
-		event.setDefaultTag("service", sdk.config.ServiceName)
-		sdk.collector.Add(event)
 	}
 }

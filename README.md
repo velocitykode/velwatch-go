@@ -167,7 +167,7 @@ defer span.End()
 
 For a plain `net/http` server with no Velocity router. A Velocity app does not
 need it: the router's own request events carry the trace, and the SDK records
-them, log lines included.
+them.
 
 ```go
 mux := http.NewServeMux()
@@ -223,109 +223,94 @@ VELWATCH_BATCH_SIZE=100          # Events per batch
 VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
 VELWATCH_INSECURE=true           # Disable TLS (local dev)
 VELWATCH_DISABLED=true           # Disable the SDK entirely
-VELWATCH_LOG_CAPTURE=true        # Capture log lines emitted during a span (default off)
-VELWATCH_LOG_SLOW_THRESHOLD=1s   # A span slower than this keeps every line it logged
-VELWATCH_LOG_LEVEL=info          # Lowest level captured: debug|info|warn|error (default info)
-VELWATCH_LOG_MAX_LINES=50        # Log lines one span buffers before only errors are kept (default 50)
+VELWATCH_LOG_CAPTURE=true        # Ship the lines written to the velwatch log channel (default off)
+VELWATCH_LOG_LEVEL=info          # Lowest level shipped: debug|info|warn|error (default info)
+VELWATCH_LOG_MAX_PER_SECOND=1000 # Log lines this process ships per second (default 1000)
 ```
 
-With `VELWATCH_LOG_CAPTURE=true` the SDK wraps the current `slog` default
-handler, so the application's own logging keeps working and log lines emitted
-while a span is active are buffered on that span; lines emitted outside any
-span are dropped. Left unset, `slog` is untouched. Applications that build
-their own logger can wrap the handler themselves with `velwatch.LogHandler()`,
-which returns `nil` when capture is off.
+## Logs
 
-A span is active when the line's context carries a trace id, so pass the
-context you were given: `slog.InfoContext(ctx, ...)`, or a logger that has it.
-In a Velocity app that is all there is to do. The router, the queue worker
-and the scheduler put the trace on their contexts, the handler buffers each
-line on that span, and the SDK's event listeners close the buffer when the
-framework reports the request, job or task ended, with its status code or
-error and its real duration. Requests, jobs and scheduled tasks are covered
-with no code beyond the blank import and the variable.
+Logs are **traceless**. A log line is not attached to a request: it is stored
+on its own and searched by service, level, message and time. Nothing in your
+application changes to send them.
 
-When the span ends, its buffered lines are queued as `log` records carrying
-the trace, span and parent ids of that span, so they are batched and flushed
-alongside it. Each record holds the message, the lowercase level, its OTLP
-severity number and the line attributes flattened to dotted keys
-(`db.query.table`); its timestamp is the one `slog` stamped on the record, not
-the flush time.
+The SDK registers a Velocity **log driver** named `velwatch`. You add it to
+your log stack next to `console`, exactly as you would add any other channel,
+and every `log.Info` / `log.Warn` / `log.Error` / `log.Debug` call the
+application already makes reaches Velwatch as well as the console. There is no
+context to thread, no wrapper to install and no call site to touch.
 
-Outside the framework, whoever opens a span closes it. `Middleware` brackets
-every request of a plain `net/http` server itself. A console command or any
-other hand-rolled span does the same in two lines:
+### What an application adds
+
+1. The blank import that turns the SDK on, plus the stack leaf, in `main.go`:
 
 ```go
-ctx, logs := velwatch.StartSpanLogs(ctx)
-defer velwatch.RecordSpanLogs(logs)
+import (
+    _ "github.com/velocitykode/velwatch-go"
+
+    // The stack driver lives in its own leaf and self-registers from that
+    // package's init, so a stack channel needs this blank import. The
+    // log/standard aggregator (console + file + daily + stack) works too.
+    _ "github.com/velocitykode/velocity/log/stack"
+)
 ```
 
-Both calls are no-ops while log capture is off. A buffer bound to the context
-this way always wins over the framework path, so a Velocity app that also
-wraps its handler in `Middleware` ships each line once.
+2. Two lines of config, making the default channel a stack of `console` and
+   `velwatch`:
 
-A span the SDK never sees end (a line logged after the request finished, a
-job longer than ten minutes, a trace id with no matching framework event) is
-recorded after ten minutes with no outcome, so it still ships what the keep
-rules allow and never leaks. At most 4096 such framework spans hold open
-buffers at once; lines past that are dropped and counted on
-`velwatch.LogsDroppedSpanLimit()`.
-
-Which of the buffered lines are actually sent is decided when the span ends,
-so healthy traffic ships almost nothing:
-
-1. the span failed (a 5xx response, a recorded exception or panic, a job or
-   command that returned an error) - every line is kept;
-2. the span was slower than `VELWATCH_LOG_SLOW_THRESHOLD` (a Go duration,
-   default `1s`; an invalid value fails initialization) - every line is kept;
-3. warn and above is always kept;
-4. everything else survives only when the trace is sampled at
-   `VELWATCH_SAMPLE_RATE`. The verdict is derived from the trace id, so every
-   span of a trace agrees and the ingest service reaches the same answer.
-
-Discarded lines are counted on `SpanLogs.DroppedByKeepRule()`, which
-`SpanLogs.Dropped()` reports together with the lines the cap and the level
-floor refused. The framework listeners and `Middleware` pass the real status
-and duration themselves. Tell the buffer how a hand-rolled span ended before
-recording it:
-
-```go
-logs.SetOutcome(velwatch.SpanOutcome{Failed: err != nil, Duration: time.Since(start)})
-velwatch.RecordSpanLogs(logs)
+```bash
+LOG_DRIVER=stack
+LOG_STACK=console,velwatch
 ```
 
-### What one span may capture
+3. The SDK variables, as usual:
 
-Two limits bound what a single span can produce before any of it reaches the
-buffer, so a request that logs in a loop cannot hold unbounded memory:
+```bash
+VELWATCH_TOKEN=vw_xxx
+VELWATCH_LOG_CAPTURE=true
+```
+
+That is the whole integration. The `velwatch` channel is registered whether or
+not the SDK is configured, so you can leave it in `LOG_STACK` permanently: with
+`VELWATCH_LOG_CAPTURE` unset the channel drops every line it is handed, and the
+console keeps printing exactly as before.
+
+### What arrives
+
+Each call becomes one log record carrying:
+
+- the message,
+- the lowercase level (`debug`, `info`, `warn`, `error`; `Fatal` is recorded as
+  `error`) and its OTLP severity number,
+- the key/value arguments flattened to dotted keys, so
+  `log.Info("saved", slog.Group("db", slog.String("table", "users")))` arrives
+  with `db.table`,
+- the `service` tag,
+- the time the line was written, not the flush time,
+- **empty** trace, span and parent ids.
+
+Records are exported as OTLP `LogRecord`s over the same connection as spans, on
+both `otlp` (the `LogsService` on the trace gRPC connection) and `otlphttp`
+(`POST /v1/logs` beside `/v1/traces`), grouped under the same resource, so logs
+and traces agree on `service.name` and `service.version`.
+
+### Volume control
 
 - `VELWATCH_LOG_LEVEL` (default `info`, one of `debug`, `info`, `warn`,
-  `error`, case-insensitive) is the lowest level captured. Debug lines are not
-  buffered unless you set `VELWATCH_LOG_LEVEL=debug`. The floor governs
-  capture only: every record is still handed to the application's own `slog`
-  handler, so what the application logs never changes.
-- `VELWATCH_LOG_MAX_LINES` (default `50`) is the most lines one span buffers.
-  Past the ceiling only error lines are still taken, so a span that emits five
-  hundred info lines and then fails still records the error that explains it.
-  Error lines get the same number of lines again as headroom and are refused
-  past that, so a span never buffers more than twice the cap. The cap must be
-  a positive integer and cannot be switched off; raise it instead.
+  `error`, case-insensitive) is the lowest level shipped. It is a Velwatch
+  volume control only: a line below the floor is still printed by the other
+  channels in your stack, so what the application logs never changes.
+- `VELWATCH_LOG_MAX_PER_SECOND` (default `1000`) caps how many lines this
+  process ships per second. Lines past the cap inside one second are dropped
+  and counted on `velwatch.LogsDroppedRate()`, so a service that suddenly logs
+  in a hot loop cannot flood the ingest. It must be a positive integer and
+  cannot be switched off; raise it instead.
 
-Both are applied at capture time, before the keep rules above, and an invalid
-value for either fails initialization with an error naming the variable.
-Refused lines are counted on `SpanLogs.DroppedByFloor()` and
-`SpanLogs.DroppedByCap()`; `SpanLogs.DroppedAtCapture()` reports their sum,
-which the SDK attaches to the request, job or task record as the `log.dropped`
-attribute when it is above zero. Reading it from the request keeps the gap
-visible even when a span had every line dropped and shipped no log record at
-all.
+An invalid value for either fails initialization with an error naming the
+variable, rather than quietly changing what the service ships.
 
-Captured lines are exported as OTLP `LogRecord`s over the same connection as
-the spans they belong to, on both `otlp` (the `LogsService` on the trace gRPC
-connection) and `otlphttp` (`POST /v1/logs` beside `/v1/traces`), grouped under
-the same resource so a request and its log lines agree on `service.name` and
-`service.version`.
+The driver never blocks the caller, never panics and never logs: while the SDK
+is dormant, disabled or shipping is off it returns immediately.
 
 ## Testing
 
