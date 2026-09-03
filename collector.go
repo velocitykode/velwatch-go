@@ -1,6 +1,7 @@
 package velwatch
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -76,12 +77,28 @@ func (c *Collector) export(events []*Event) {
 		if exporter, ok := c.exporter.(LogRecordExporter); ok {
 			_ = exporter.ExportLogRecords(logs)
 		} else {
+			warnNoLogSupport(c.exporter)
 			logRecordsDropped.Add(uint64(len(logs)))
 		}
 	}
 	if len(spans) > 0 {
 		_ = c.exporter.Export(spans)
 	}
+}
+
+// noLogSupportWarned makes the "this exporter cannot ship log records" notice
+// a once-per-process line rather than one per flush.
+var noLogSupportWarned sync.Once
+
+// warnNoLogSupport reports, once, that captured log lines are being discarded
+// because the configured exporter has no log signal. Both wire protocols the
+// SDK ships (otlp, otlphttp) implement LogRecordExporter, and the removed grpc
+// wire is rejected at initialization, so this only fires for a custom exporter.
+func warnNoLogSupport(exporter Exporter) {
+	noLogSupportWarned.Do(func() {
+		log.Printf("velwatch: exporter %T cannot ship log records; captured log lines are dropped "+
+			"(see LogRecordsDropped)", exporter)
+	})
 }
 
 // Len returns the current number of batched events
