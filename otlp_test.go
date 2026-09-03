@@ -111,11 +111,61 @@ func TestEventToSpan_TagsBecomeAttributes(t *testing.T) {
 		t.Errorf("Kind = %v, want CONSUMER", span.Kind)
 	}
 	m := attrMap(span.Attributes)
-	if v := m["service"].GetStringValue(); v != "api" {
-		t.Errorf("service tag = %q, want api", v)
+	if v := m["velwatch.tag.service"].GetStringValue(); v != "api" {
+		t.Errorf("velwatch.tag.service = %q, want api", v)
 	}
 	if v := m["messaging.destination.name"].GetStringValue(); v != "emails" {
 		t.Errorf("messaging.destination.name = %q, want emails", v)
+	}
+}
+
+func TestSpanAttributes_CallerTagIsPrefixedOnly(t *testing.T) {
+	e := NewEvent(EventTypeRequest).WithTag("team", "billing")
+	m := attrMap(spanAttributes(e))
+
+	if v := m["velwatch.tag.team"].GetStringValue(); v != "billing" {
+		t.Errorf("velwatch.tag.team = %q, want billing", v)
+	}
+	if _, ok := m["team"]; ok {
+		t.Error("flat 'team' attribute should not be emitted for a caller tag")
+	}
+}
+
+func TestSpanAttributes_ReservedTagsAlsoStayFlat(t *testing.T) {
+	e := NewEvent(EventTypeRequest)
+	e.setDefaultTag(tagRelease, "1.4.2")
+	e.setDefaultTag(tagCommitSHA, "abc123")
+	m := attrMap(spanAttributes(e))
+
+	for key, want := range map[string]string{
+		"velwatch.tag.release":    "1.4.2",
+		"release":                 "1.4.2",
+		"velwatch.tag.commit_sha": "abc123",
+		"commit_sha":              "abc123",
+	} {
+		if v := m[key].GetStringValue(); v != want {
+			t.Errorf("%s = %q, want %q", key, v, want)
+		}
+	}
+}
+
+func TestSpanAttributes_TagKeyEdgeCases(t *testing.T) {
+	e := NewEvent(EventTypeRequest)
+	e.Tags[""] = "dropped"
+	e.Tags["velwatch.tag.already"] = "kept"
+	m := attrMap(spanAttributes(e))
+
+	if _, ok := m[""]; ok {
+		t.Error("empty tag key should be dropped, not exported")
+	}
+	if _, ok := m[tagAttrPrefix]; ok {
+		t.Error("empty tag key should not export a bare prefix attribute")
+	}
+	if v := m["velwatch.tag.already"].GetStringValue(); v != "kept" {
+		t.Errorf("velwatch.tag.already = %q, want kept", v)
+	}
+	if _, ok := m["velwatch.tag.velwatch.tag.already"]; ok {
+		t.Error("an already-prefixed tag key must not be prefixed twice")
 	}
 }
 

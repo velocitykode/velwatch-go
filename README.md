@@ -149,6 +149,14 @@ event.Tags["environment"] = "production"
 velwatch.RecordEvent(event)
 ```
 
+Over the OTLP exporters (`otlp` and `otlphttp`) each tag is exported as a span
+attribute named `velwatch.tag.<key>`, so the example above ships
+`velwatch.tag.environment=production`. Velwatch promotes those attributes into
+the record's tags and drops them from the attributes JSON, which keeps tag keys
+from colliding with semantic-convention attribute keys. The reserved tags
+`release` and `commit_sha` are also emitted in their flat form for one more
+release; that copy is deprecated, so read the prefixed keys.
+
 ### Custom Spans
 
 ```go

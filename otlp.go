@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -25,6 +26,24 @@ const (
 	sdkName    = "velwatch-go"
 	sdkVersion = "0.1.0"
 )
+
+// tagAttrPrefix namespaces event tags on the OTLP wire. The platform promotes
+// span attributes named velwatch.tag.<key> into the record's tags column and
+// drops them from the attributes JSON, so a caller tag never collides with a
+// semantic-convention attribute key.
+const tagAttrPrefix = "velwatch.tag."
+
+// flatTagKeys are the reserved tags still emitted as a flat span attribute
+// alongside their prefixed form, so platform builds predating the
+// velwatch.tag.* contract keep resolving them.
+//
+// Deprecated: the flat copies exist for one release only and are removed after
+// that. Read release and commit_sha from velwatch.tag.release and
+// velwatch.tag.commit_sha.
+var flatTagKeys = map[string]bool{
+	tagRelease:   true,
+	tagCommitSHA: true,
+}
 
 // OTLPExporter ships events as OpenTelemetry spans over OTLP/gRPC. This is the
 // standard, ecosystem-compatible wire: the same protocol any OTel-instrumented
@@ -252,11 +271,12 @@ var semconvKeys = map[string]map[string]string{
 
 // spanAttributes builds the OTLP attribute list for an event: known keys are
 // renamed to semantic conventions, the rest pass through verbatim, and tags are
-// appended. The duration_ms attribute is dropped (it is the span duration) and
+// appended under the velwatch.tag.* prefix. The duration_ms attribute is
+// dropped (it is the span duration) and
 // exception fields are dropped (they live on the exception span event).
 func spanAttributes(ev *Event) []*commonpb.KeyValue {
 	rename := semconvKeys[ev.Type]
-	attrs := make([]*commonpb.KeyValue, 0, len(ev.Attributes)+len(ev.Tags))
+	attrs := make([]*commonpb.KeyValue, 0, len(ev.Attributes)+len(ev.Tags)+len(flatTagKeys))
 
 	for k, v := range ev.Attributes {
 		if k == "duration_ms" {
@@ -272,7 +292,17 @@ func spanAttributes(ev *Event) []*commonpb.KeyValue {
 		attrs = append(attrs, anyAttr(key, v))
 	}
 	for k, v := range ev.Tags {
-		attrs = append(attrs, stringAttr(k, v))
+		if k == "" {
+			continue
+		}
+		key := k
+		if !strings.HasPrefix(key, tagAttrPrefix) {
+			key = tagAttrPrefix + key
+		}
+		attrs = append(attrs, stringAttr(key, v))
+		if flatTagKeys[k] {
+			attrs = append(attrs, stringAttr(k, v))
+		}
 	}
 	return attrs
 }

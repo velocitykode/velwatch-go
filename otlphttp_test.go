@@ -47,7 +47,7 @@ func TestOTLPHTTPExporter_PostsProtobuf(t *testing.T) {
 		t.Fatalf("NewOTLPHTTPExporter: %v", err)
 	}
 
-	e := NewRequestEvent("GET", "/health", 200, 4)
+	e := NewRequestEvent("GET", "/health", 200, 4).WithTag("team", "billing")
 	e.TraceID = "0123456789abcdef0123456789abcdef"
 	e.SpanID = "0123456789abcdef"
 	if err := exp.Export([]*Event{e}); err != nil {
@@ -66,6 +66,15 @@ func TestOTLPHTTPExporter_PostsProtobuf(t *testing.T) {
 	spans := gotReq.ResourceSpans[0].ScopeSpans[0].Spans
 	if len(spans) != 1 || spans[0].Name != "GET /health" {
 		t.Fatalf("unexpected spans: %+v", spans)
+	}
+	// The HTTP exporter shares the span builder, so tags cross the wire
+	// prefixed and with no flat copy.
+	m := attrMap(spans[0].Attributes)
+	if v := m["velwatch.tag.team"].GetStringValue(); v != "billing" {
+		t.Errorf("velwatch.tag.team = %q, want billing", v)
+	}
+	if _, ok := m["team"]; ok {
+		t.Error("flat 'team' attribute should not cross the HTTP wire")
 	}
 }
 
