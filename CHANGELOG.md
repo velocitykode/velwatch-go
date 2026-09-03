@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the attributes JSON, so caller tags can no longer collide with a
   semantic-convention attribute key. A tag key that already starts with
   `velwatch.tag.` is passed through unchanged rather than prefixed twice, and an
-  empty tag key is dropped.
+  empty tag key is dropped. The legacy `grpc` transport (`EventService`)
+  carries its own `Tags` field and is unaffected.
 
 ### Deprecated
 
@@ -47,9 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `velwatch.tag.commit_sha` forms, so platform builds predating the prefix
   contract keep resolving them. The flat copies are kept for one release only
   and are removed after that; read the prefixed keys.
-
-- The legacy `grpc` transport (`EventService`) carries its own `Tags` field and
-  is unaffected by this change.
 
 ### Migration
 
