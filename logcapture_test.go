@@ -2,12 +2,14 @@ package velwatch
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 // recordingHandler is a slog.Handler that keeps every record it is given, so
@@ -400,5 +402,42 @@ func TestConfigFromEnvLogCapture(t *testing.T) {
 	}
 	if cfg := configFromEnv(); cfg.LogCapture {
 		t.Error(`LogCapture = true with VELWATCH_LOG_CAPTURE=1, want false (only "true" enables it)`)
+	}
+}
+
+func TestLogCaptureNormalizesAttributeValues(t *testing.T) {
+	captureForTest(t)
+	ctx, logs := tracedContext(t)
+
+	stamp := time.Date(2026, 3, 1, 12, 30, 45, 123456789, time.UTC)
+	slog.InfoContext(ctx, "value kinds",
+		"text", "hello",
+		"ok", true,
+		"count", 7,
+		"ratio", 1.5,
+		"took", 250*time.Millisecond,
+		"at", stamp,
+		"err", errors.New("boom"),
+		"other", []string{"a", "b"},
+	)
+
+	lines := logs.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("buffered %d lines, want 1", len(lines))
+	}
+	want := map[string]any{
+		"text":  "hello",
+		"ok":    true,
+		"count": int64(7),
+		"ratio": 1.5,
+		"took":  "250ms",
+		"at":    stamp.Format(time.RFC3339Nano),
+		"err":   "boom",
+		"other": "[a b]",
+	}
+	for key, value := range want {
+		if got := lines[0].Attrs[key]; got != value {
+			t.Errorf("Attrs[%q] = %v (%T), want %v (%T)", key, got, got, value, value)
+		}
 	}
 }

@@ -2,9 +2,11 @@ package velwatch
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // flatAttr is one handler attribute already flattened to its dotted key.
@@ -153,7 +155,39 @@ func flattenAttr(prefix string, a slog.Attr, out *[]flatAttr) {
 	if a.Key == "" {
 		return
 	}
-	*out = append(*out, flatAttr{key: prefix + a.Key, value: a.Value.Any()})
+	*out = append(*out, flatAttr{key: prefix + a.Key, value: logAttrValue(a.Value)})
+}
+
+// logAttrValue converts a resolved slog value into the representation a
+// buffered line carries. Strings, bools, integers and floats are kept as they
+// are; durations become their string form, timestamps RFC3339Nano, errors
+// their message, and anything else its fmt %v rendering. Converting here
+// rather than at export time keeps a buffered line free of references to
+// values the application may still be mutating, and gives every wire format
+// the same set of value kinds to map.
+func logAttrValue(v slog.Value) any {
+	switch v.Kind() {
+	case slog.KindString:
+		return v.String()
+	case slog.KindBool:
+		return v.Bool()
+	case slog.KindInt64:
+		return v.Int64()
+	case slog.KindUint64:
+		return v.Uint64()
+	case slog.KindFloat64:
+		return v.Float64()
+	case slog.KindDuration:
+		return v.Duration().String()
+	case slog.KindTime:
+		return v.Time().Format(time.RFC3339Nano)
+	default:
+		value := v.Any()
+		if err, ok := value.(error); ok {
+			return err.Error()
+		}
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 var (
