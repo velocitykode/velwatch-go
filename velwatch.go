@@ -15,11 +15,10 @@
 //	VELWATCH_TOKEN          project API token (required; unset = SDK dormant)
 //	VELWATCH_ENDPOINT       ingest endpoint (default per protocol:
 //	                        "localhost:4317" for "otlp", "localhost:4318" for
-//	                        "otlphttp", "localhost:50051" for "grpc")
+//	                        "otlphttp")
 //	VELWATCH_SERVICE_NAME   service name in traces (default APP_NAME)
-//	VELWATCH_PROTOCOL       wire protocol: "otlp" (OTLP/gRPC), "otlphttp"
-//	                        (OTLP/HTTP), or "grpc" (deprecated legacy
-//	                        EventService wire) (default "otlp")
+//	VELWATCH_PROTOCOL       wire protocol: "otlp" (OTLP/gRPC) or "otlphttp"
+//	                        (OTLP/HTTP) (default "otlp")
 //	VELWATCH_INSECURE       "true" disables TLS for local development
 //	VELWATCH_SAMPLE_RATE    fraction of requests traced, 0.0-1.0 (default 1.0)
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
@@ -38,7 +37,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -49,12 +47,15 @@ import (
 )
 
 // Wire protocols accepted by Config.Protocol and VELWATCH_PROTOCOL. OTLP is
-// the ingest contract going forward; protocolGRPC selects the deprecated
-// first-party EventService wire and is kept only for existing deployments.
+// the ingest contract: the two values differ only in transport.
 const (
 	protocolOTLP     = "otlp"
 	protocolOTLPHTTP = "otlphttp"
-	protocolGRPC     = "grpc"
+
+	// legacyProtocol is the removed first-party wire. It stays recognized so
+	// a deployment still carrying it fails with the migration message rather
+	// than the generic unknown-protocol error.
+	legacyProtocol = "grpc"
 )
 
 const (
@@ -64,9 +65,9 @@ const (
 	// defaultOTLPHTTPPort is the standard OTLP/HTTP receiver port.
 	defaultOTLPHTTPPort = "4318"
 
-	// legacyGRPCPort is the port the deprecated EventService listens on.
-	// An endpoint on this port paired with an OTLP protocol is a misconfig.
-	legacyGRPCPort = "50051"
+	// legacyIngestPort is the port the removed first-party ingest wire
+	// listened on. An endpoint still pointing at it is a stale config.
+	legacyIngestPort = "50051"
 )
 
 // defaultEndpointFor returns the local endpoint used when none is configured.
@@ -76,8 +77,6 @@ func defaultEndpointFor(protocol string) string {
 	switch protocol {
 	case protocolOTLPHTTP:
 		return "localhost:" + defaultOTLPHTTPPort
-	case protocolGRPC:
-		return "localhost:" + legacyGRPCPort
 	default:
 		return "localhost:" + defaultOTLPPort
 	}
@@ -85,12 +84,10 @@ func defaultEndpointFor(protocol string) string {
 
 // Config contains configuration options for the Velwatch SDK
 type Config struct {
-	// Endpoint is the Velwatch ingest endpoint. For the OTLP protocols this
-	// is the OTLP receiver (e.g., "velwatch.example.com:4317", or a URL for
-	// "otlphttp"); for the deprecated "grpc" protocol it is the EventService
-	// address (e.g., "velwatch.example.com:50051"). When empty it defaults to
-	// the local receiver for the selected protocol: "localhost:4317" for
-	// "otlp", "localhost:4318" for "otlphttp", "localhost:50051" for "grpc".
+	// Endpoint is the Velwatch ingest endpoint: the OTLP receiver
+	// (e.g., "velwatch.example.com:4317", or a URL for "otlphttp"). When
+	// empty it defaults to the local receiver for the selected protocol:
+	// "localhost:4317" for "otlp", "localhost:4318" for "otlphttp".
 	Endpoint string
 
 	// Token is the project API token (e.g., "vw_xxx...")
@@ -105,9 +102,8 @@ type Config struct {
 	// FlushInterval is how often to flush batched events (default: 1s)
 	FlushInterval time.Duration
 
-	// Protocol selects the wire format: "otlp" for OpenTelemetry OTLP/gRPC,
-	// "otlphttp" for OTLP/HTTP, or "grpc" for the deprecated legacy Velwatch
-	// EventService proto. Default: "otlp".
+	// Protocol selects the wire format: "otlp" for OpenTelemetry OTLP/gRPC
+	// or "otlphttp" for OTLP/HTTP. Default: "otlp".
 	Protocol string
 
 	// Insecure disables TLS for local development
@@ -217,7 +213,10 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if config.Token == "" {
 		return errors.New("velwatch: Token is required")
 	}
-	if err := validateEndpoint(config.Protocol, config.Endpoint); err != nil {
+	if err := validateProtocol(config.Protocol); err != nil {
+		return err
+	}
+	if err := validateEndpoint(config.Endpoint); err != nil {
 		return err
 	}
 
@@ -275,49 +274,42 @@ func newExporter(config Config) (Exporter, error) {
 		}
 		exp.release, exp.commitSHA = config.Release, config.CommitSHA
 		return exp, nil
-	case protocolGRPC:
-		warnLegacyProtocol()
-		exp, err := NewTransport(config.Endpoint, config.Token, config.Insecure)
-		if err != nil {
+	default:
+		if err := validateProtocol(config.Protocol); err != nil {
 			return nil, err
 		}
-		exp.release, exp.commitSHA = config.Release, config.CommitSHA
-		return exp, nil
+		return nil, fmt.Errorf("velwatch: no exporter for protocol %q", config.Protocol)
+	}
+}
+
+// validateProtocol rejects a protocol the SDK cannot ship events over. The
+// removed first-party wire gets its own message so an upgraded deployment is
+// told what to set instead of only that the value is unknown.
+func validateProtocol(protocol string) error {
+	switch protocol {
+	case protocolOTLP, protocolOTLPHTTP:
+		return nil
+	case legacyProtocol:
+		return fmt.Errorf("velwatch: protocol %q was removed; set VELWATCH_PROTOCOL=%s or leave it unset, "+
+			"and point VELWATCH_ENDPOINT at the OTLP receiver (port %s). Valid values: %q, %q",
+			legacyProtocol, protocolOTLP, defaultOTLPPort, protocolOTLP, protocolOTLPHTTP)
 	default:
-		return nil, fmt.Errorf("velwatch: unknown protocol %q (valid values: %q, %q, %q)",
-			config.Protocol, protocolOTLP, protocolOTLPHTTP, protocolGRPC)
+		return fmt.Errorf("velwatch: unknown protocol %q (valid values: %q, %q)",
+			protocol, protocolOTLP, protocolOTLPHTTP)
 	}
 }
 
-// legacyProtocolOnce keeps the deprecation notice to a single line per
-// process, however many times the SDK is initialized.
-var legacyProtocolOnce sync.Once
-
-// warnLegacyProtocol logs the EventService deprecation notice once.
-func warnLegacyProtocol() {
-	legacyProtocolOnce.Do(func() {
-		log.Printf("velwatch: protocol %q selects the legacy EventService wire, which is deprecated "+
-			"and is scheduled for removal in the next major version. Unset VELWATCH_PROTOCOL to use "+
-			"the OTLP default, and point VELWATCH_ENDPOINT at the OTLP receiver port %s.",
-			protocolGRPC, defaultOTLPPort)
-	})
-}
-
-// validateEndpoint rejects an endpoint that clearly belongs to the deprecated
-// EventService wire while an OTLP protocol is selected. OTLP became the
-// default, so an upgraded deployment that still points at the legacy port
-// would otherwise fail silently at export time instead of at startup.
-func validateEndpoint(protocol, endpoint string) error {
-	if protocol == protocolGRPC {
+// validateEndpoint rejects an endpoint left pointing at the removed
+// first-party ingest port. Every remaining wire is OTLP, so such an endpoint
+// is stale config that would otherwise fail silently at export time instead
+// of at startup.
+func validateEndpoint(endpoint string) error {
+	if endpointPort(endpoint) != legacyIngestPort {
 		return nil
 	}
-	if endpointPort(endpoint) != legacyGRPCPort {
-		return nil
-	}
-	return fmt.Errorf("velwatch: endpoint %q uses the legacy EventService port %s but protocol %q is "+
-		"selected; point the endpoint at the OTLP receiver (port %s) or set the protocol to %q to keep "+
-		"the deprecated wire",
-		endpoint, legacyGRPCPort, protocol, defaultOTLPPort, protocolGRPC)
+	return fmt.Errorf("velwatch: endpoint %q uses port %s, which served the removed first-party ingest "+
+		"wire; point VELWATCH_ENDPOINT at the OTLP receiver (port %s for %q, port %s for %q)",
+		endpoint, legacyIngestPort, defaultOTLPPort, protocolOTLP, defaultOTLPHTTPPort, protocolOTLPHTTP)
 }
 
 // endpointPort extracts the port from an endpoint, which may be a bare

@@ -113,8 +113,8 @@ func TestSetDefaultTag(t *testing.T) {
 	}
 }
 
-func TestTransportSend_StampsReleaseTags(t *testing.T) {
-	tr := &Transport{release: "1.4.2", commitSHA: "abc123"}
+func TestExporterSend_StampsReleaseTags(t *testing.T) {
+	tr := &OTLPExporter{release: "1.4.2", commitSHA: "abc123"}
 
 	// A fresh event gets both tags stamped.
 	e := NewRequestEvent("GET", "/", 200, 1)

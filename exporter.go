@@ -5,8 +5,6 @@ package velwatch
 //
 //	*OTLPExporter      - OpenTelemetry OTLP/gRPC (the default wire)
 //	*OTLPHTTPExporter  - OpenTelemetry OTLP/HTTP (protobuf over POST /v1/traces)
-//	*Transport         - legacy Velwatch gRPC proto (EventService.Ingest),
-//	                     deprecated and scheduled for removal in the next major version
 //
 // A new wire protocol is added by implementing this interface; no collector,
 // listener, or SDK lifecycle code changes.
