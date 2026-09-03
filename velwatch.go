@@ -13,10 +13,11 @@
 // Environment variables:
 //
 //	VELWATCH_TOKEN          project API token (required; unset = SDK dormant)
-//	VELWATCH_ENDPOINT       ingest endpoint (default "localhost:50051")
+//	VELWATCH_ENDPOINT       ingest endpoint (default "localhost:4317")
 //	VELWATCH_SERVICE_NAME   service name in traces (default APP_NAME)
-//	VELWATCH_PROTOCOL       wire protocol: "grpc" (legacy), "otlp" (OTLP/gRPC),
-//	                        or "otlphttp" (OTLP/HTTP) (default "grpc")
+//	VELWATCH_PROTOCOL       wire protocol: "otlp" (OTLP/gRPC), "otlphttp"
+//	                        (OTLP/HTTP), or "grpc" (deprecated legacy
+//	                        EventService wire) (default "otlp")
 //	VELWATCH_INSECURE       "true" disables TLS for local development
 //	VELWATCH_SAMPLE_RATE    fraction of requests traced, 0.0-1.0 (default 1.0)
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
@@ -34,6 +35,10 @@ package velwatch
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,9 +46,33 @@ import (
 	"github.com/velocitykode/velocity/contract"
 )
 
+// Wire protocols accepted by Config.Protocol and VELWATCH_PROTOCOL. OTLP is
+// the ingest contract going forward; protocolGRPC selects the deprecated
+// first-party EventService wire and is kept only for existing deployments.
+const (
+	protocolOTLP     = "otlp"
+	protocolOTLPHTTP = "otlphttp"
+	protocolGRPC     = "grpc"
+)
+
+const (
+	// defaultOTLPPort is the standard OTLP/gRPC receiver port.
+	defaultOTLPPort = "4317"
+
+	// defaultEndpoint is the endpoint used when VELWATCH_ENDPOINT is unset.
+	defaultEndpoint = "localhost:" + defaultOTLPPort
+
+	// legacyGRPCPort is the port the deprecated EventService listens on.
+	// An endpoint on this port paired with an OTLP protocol is a misconfig.
+	legacyGRPCPort = "50051"
+)
+
 // Config contains configuration options for the Velwatch SDK
 type Config struct {
-	// Endpoint is the Velwatch gRPC endpoint (e.g., "velwatch.example.com:50051")
+	// Endpoint is the Velwatch ingest endpoint. For the OTLP protocols this
+	// is the OTLP receiver (e.g., "velwatch.example.com:4317", or a URL for
+	// "otlphttp"); for the deprecated "grpc" protocol it is the EventService
+	// address (e.g., "velwatch.example.com:50051").
 	Endpoint string
 
 	// Token is the project API token (e.g., "vw_xxx...")
@@ -59,8 +88,8 @@ type Config struct {
 	FlushInterval time.Duration
 
 	// Protocol selects the wire format: "otlp" for OpenTelemetry OTLP/gRPC,
-	// "otlphttp" for OTLP/HTTP, or "grpc" for the legacy Velwatch proto.
-	// Default: "grpc".
+	// "otlphttp" for OTLP/HTTP, or "grpc" for the deprecated legacy Velwatch
+	// EventService proto. Default: "otlp".
 	Protocol string
 
 	// Insecure disables TLS for local development
@@ -145,7 +174,7 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 		config.SampleRate = 1.0
 	}
 	if config.Protocol == "" {
-		config.Protocol = "grpc"
+		config.Protocol = protocolOTLP
 	}
 
 	// Resolve release/commit metadata once, honoring explicit config over
@@ -167,6 +196,9 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	}
 	if config.Token == "" {
 		return errors.New("velwatch: Token is required")
+	}
+	if err := validateEndpoint(config.Protocol, config.Endpoint); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -205,31 +237,87 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 }
 
 // newExporter builds the exporter for the configured wire protocol, threading
-// the resolved release/commit metadata to it.
+// the resolved release/commit metadata to it. An unknown protocol is an error
+// rather than a silent fallback.
 func newExporter(config Config) (Exporter, error) {
 	switch config.Protocol {
-	case "otlp":
+	case protocolOTLP:
 		exp, err := NewOTLPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
 		if err != nil {
 			return nil, err
 		}
 		exp.release, exp.commitSHA = config.Release, config.CommitSHA
 		return exp, nil
-	case "otlphttp":
+	case protocolOTLPHTTP:
 		exp, err := NewOTLPHTTPExporter(config.Endpoint, config.Token, config.ServiceName, config.Insecure)
 		if err != nil {
 			return nil, err
 		}
 		exp.release, exp.commitSHA = config.Release, config.CommitSHA
 		return exp, nil
-	default:
+	case protocolGRPC:
+		warnLegacyProtocol()
 		exp, err := NewTransport(config.Endpoint, config.Token, config.Insecure)
 		if err != nil {
 			return nil, err
 		}
 		exp.release, exp.commitSHA = config.Release, config.CommitSHA
 		return exp, nil
+	default:
+		return nil, fmt.Errorf("velwatch: unknown protocol %q (valid values: %q, %q, %q)",
+			config.Protocol, protocolOTLP, protocolOTLPHTTP, protocolGRPC)
 	}
+}
+
+// legacyProtocolOnce keeps the deprecation notice to a single line per
+// process, however many times the SDK is initialized.
+var legacyProtocolOnce sync.Once
+
+// warnLegacyProtocol logs the EventService deprecation notice once.
+func warnLegacyProtocol() {
+	legacyProtocolOnce.Do(func() {
+		log.Printf("velwatch: protocol %q selects the legacy EventService wire, which is deprecated "+
+			"and will be removed in a future major version (VW-43). Unset VELWATCH_PROTOCOL to use "+
+			"the OTLP default, and point VELWATCH_ENDPOINT at the OTLP receiver port %s.",
+			protocolGRPC, defaultOTLPPort)
+	})
+}
+
+// validateEndpoint rejects an endpoint that clearly belongs to the deprecated
+// EventService wire while an OTLP protocol is selected. OTLP became the
+// default, so an upgraded deployment that still points at the legacy port
+// would otherwise fail silently at export time instead of at startup.
+func validateEndpoint(protocol, endpoint string) error {
+	if protocol == protocolGRPC {
+		return nil
+	}
+	if endpointPort(endpoint) != legacyGRPCPort {
+		return nil
+	}
+	return fmt.Errorf("velwatch: endpoint %q uses the legacy EventService port %s but protocol %q is "+
+		"selected; point the endpoint at the OTLP receiver (port %s) or set the protocol to %q to keep "+
+		"the deprecated wire",
+		endpoint, legacyGRPCPort, protocol, defaultOTLPPort, protocolGRPC)
+}
+
+// endpointPort extracts the port from an endpoint, which may be a bare
+// host:port or a full URL. It returns "" when the endpoint carries no port.
+func endpointPort(endpoint string) string {
+	hostport := endpoint
+	if i := strings.Index(hostport, "://"); i >= 0 {
+		hostport = hostport[i+3:]
+	}
+	if i := strings.IndexAny(hostport, "/?#"); i >= 0 {
+		hostport = hostport[:i]
+	}
+	if i := strings.LastIndex(hostport, "@"); i >= 0 {
+		hostport = hostport[i+1:]
+	}
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return ""
+	}
+	return port
 }
 
 // Shutdown gracefully shuts down the SDK, flushing any remaining events.

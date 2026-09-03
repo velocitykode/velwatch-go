@@ -24,7 +24,7 @@ import (
 
 ```bash
 VELWATCH_TOKEN=vw_xxx
-VELWATCH_ENDPOINT=velwatch.example.com:50051
+VELWATCH_ENDPOINT=velwatch.example.com:4317
 VELWATCH_SERVICE_NAME=my-api
 ```
 
@@ -37,7 +37,7 @@ For explicit configuration, call `Init` with a constructed Velocity app:
 
 ```go
 err := velwatch.Init(app, velwatch.Config{
-    Endpoint:    "velwatch.example.com:50051",
+    Endpoint:    "velwatch.example.com:4317",
     Token:       os.Getenv("VELWATCH_TOKEN"),
     ServiceName: "my-api",
 })
@@ -51,10 +51,10 @@ defer velwatch.Shutdown()
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `Endpoint` | string | required | Ingest endpoint (host:port for gRPC, URL for OTLP/HTTP) |
+| `Endpoint` | string | required | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP) |
 | `Token` | string | required | Project API token (vw_xxx), sent as a Bearer token |
 | `ServiceName` | string | required | Service name for identification |
-| `Protocol` | string | `grpc` | Wire protocol: `grpc`, `otlp`, or `otlphttp` |
+| `Protocol` | string | `otlp` | Wire protocol: `otlp`, `otlphttp`, or `grpc` (deprecated) |
 | `BatchSize` | int | 100 | Events to batch before sending |
 | `FlushInterval` | time.Duration | 1s | How often to flush batched events |
 | `Insecure` | bool | false | Disable TLS (for local dev) |
@@ -69,9 +69,9 @@ The SDK ships events over one of three wires, selected by `Protocol`
 
 | `Protocol` | Wire | Use |
 |------------|------|-----|
-| `grpc` (default) | Legacy Velwatch `EventService` proto | Existing deployments |
-| `otlp` | OpenTelemetry OTLP/gRPC | Backend services |
-| `otlphttp` | OpenTelemetry OTLP/HTTP (`application/x-protobuf`) | Browser, serverless, edge, mobile runtimes |
+| `otlp` (default) | OpenTelemetry OTLP/gRPC (port 4317) | Backend services |
+| `otlphttp` | OpenTelemetry OTLP/HTTP (`application/x-protobuf`, port 4318) | Browser, serverless, edge, mobile runtimes |
+| `grpc` | Legacy Velwatch `EventService` proto (port 50051) | Deprecated; existing deployments only |
 
 The OTLP exporters map events onto OpenTelemetry spans following OTel semantic
 conventions (`http.*`, `db.*`, `messaging.*`, and `exception.*` span events),
@@ -80,6 +80,31 @@ SDK telemetry and any standard OpenTelemetry source through one path.
 
 For OTLP/HTTP, `Endpoint` may be a base URL (`https://host:4318`) or a full
 traces URL; the standard `/v1/traces` path is appended when absent.
+
+An unrecognized `Protocol` fails initialization with an error listing the valid
+values, rather than falling back to a wire you did not ask for.
+
+### OTLP is the default
+
+OTLP is the ingest contract going forward. With `VELWATCH_PROTOCOL` unset the
+SDK builds the OTLP/gRPC exporter and `VELWATCH_ENDPOINT` defaults to
+`localhost:4317`.
+
+To keep the deprecated legacy `EventService` wire, opt back in explicitly and
+point the endpoint at its port:
+
+```bash
+VELWATCH_PROTOCOL=grpc
+VELWATCH_ENDPOINT=velwatch.example.com:50051
+```
+
+The legacy wire logs a deprecation warning once per process on startup and will
+be removed in a future major version (VW-43).
+
+Because the default flipped, an endpoint on the legacy port `50051` paired with
+an OTLP protocol is rejected at initialization with an explicit error instead of
+failing silently at export time. Either move the endpoint to the OTLP receiver
+port or set `VELWATCH_PROTOCOL=grpc`.
 
 ## Automatic Instrumentation
 
@@ -174,9 +199,9 @@ The SDK respects the following environment variables:
 
 ```bash
 VELWATCH_TOKEN=vw_xxx            # Project API token (unset = SDK dormant)
-VELWATCH_ENDPOINT=host:port      # Ingest endpoint
+VELWATCH_ENDPOINT=host:port      # Ingest endpoint (default localhost:4317)
 VELWATCH_SERVICE_NAME=my-api     # Service name (default APP_NAME)
-VELWATCH_PROTOCOL=grpc           # Wire protocol: grpc | otlp | otlphttp
+VELWATCH_PROTOCOL=otlp           # Wire protocol: otlp (default) | otlphttp | grpc (deprecated)
 VELWATCH_SAMPLE_RATE=0.5         # Sample rate (0.0-1.0)
 VELWATCH_BATCH_SIZE=100          # Events per batch
 VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
