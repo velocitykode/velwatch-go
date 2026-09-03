@@ -12,11 +12,12 @@ ships as the next major version.
 
 ### Breaking
 
-- **The legacy first-party ingest transport is removed.** The first-party gRPC
-  client, its generated protobuf package (`proto/events/v1`) and the `grpc`
-  value for `VELWATCH_PROTOCOL` are gone; the server no longer serves that
-  wire. `VELWATCH_PROTOCOL=grpc` now fails initialization with an error naming
-  the replacement instead of building an exporter.
+- **The legacy first-party ingest transport is removed.** The exported
+  `Transport` type and `NewTransport` constructor, the first-party gRPC client,
+  its generated protobuf package (`proto/events/v1`) and the `grpc` value for
+  `VELWATCH_PROTOCOL` are gone; the server no longer serves that wire.
+  `VELWATCH_PROTOCOL=grpc` now fails initialization with an error naming the
+  replacement instead of building an exporter.
   Migration: set `VELWATCH_PROTOCOL=otlp` (or leave it unset, since OTLP is the
   default) and point `VELWATCH_ENDPOINT` at the OTLP receiver on port `4317`.
   No code change is required.
