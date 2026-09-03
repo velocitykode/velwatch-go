@@ -22,13 +22,6 @@ ships as the next major version.
   default) and point `VELWATCH_ENDPOINT` at the OTLP receiver on port `4317`.
   No code change is required.
 
-### Added
-
-- Initialization rejects an endpoint on port `50051`, which served the removed
-  wire, with an explicit error naming the OTLP receiver ports. This catches
-  deployments that upgrade while still pointing at the old ingest port, which
-  would otherwise fail silently at export time.
-
 ### Changed
 
 - **The default wire protocol is now `otlp` (OTLP/gRPC).** With

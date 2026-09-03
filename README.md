@@ -51,7 +51,7 @@ defer velwatch.Shutdown()
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `Endpoint` | string | per protocol | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP); defaults to `localhost:4317` for `otlp`, `localhost:4318` for `otlphttp`, `localhost:50051` for `grpc` |
+| `Endpoint` | string | per protocol | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP); defaults to `localhost:4317` for `otlp`, `localhost:4318` for `otlphttp` |
 | `Token` | string | required | Project API token (vw_xxx), sent as a Bearer token |
 | `ServiceName` | string | required | Service name for identification |
 | `Protocol` | string | `otlp` | Wire protocol: `otlp` or `otlphttp` |
@@ -108,8 +108,9 @@ To migrate, set `VELWATCH_PROTOCOL=otlp` (or leave it unset, since OTLP is the
 default) and point `VELWATCH_ENDPOINT` at the OTLP receiver on port `4317`. No
 code change is required.
 
-An endpoint left on port `50051` is rejected at initialization with an explicit
-error rather than failing silently at export time.
+Port `50051` itself is still a valid endpoint: the platform serves the OTLP
+gRPC receiver on that port, so `VELWATCH_ENDPOINT=localhost:50051` with
+`VELWATCH_PROTOCOL=otlp` is a supported local and self-hosted configuration.
 
 ## Automatic Instrumentation
 

@@ -37,8 +37,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -64,10 +62,6 @@ const (
 
 	// defaultOTLPHTTPPort is the standard OTLP/HTTP receiver port.
 	defaultOTLPHTTPPort = "4318"
-
-	// legacyIngestPort is the port the removed first-party ingest wire
-	// listened on. An endpoint still pointing at it is a stale config.
-	legacyIngestPort = "50051"
 )
 
 // defaultEndpointFor returns the local endpoint used when none is configured.
@@ -216,9 +210,6 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if err := validateProtocol(config.Protocol); err != nil {
 		return err
 	}
-	if err := validateEndpoint(config.Endpoint); err != nil {
-		return err
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -297,39 +288,6 @@ func validateProtocol(protocol string) error {
 		return fmt.Errorf("velwatch: unknown protocol %q (valid values: %q, %q)",
 			protocol, protocolOTLP, protocolOTLPHTTP)
 	}
-}
-
-// validateEndpoint rejects an endpoint left pointing at the removed
-// first-party ingest port. Every remaining wire is OTLP, so such an endpoint
-// is stale config that would otherwise fail silently at export time instead
-// of at startup.
-func validateEndpoint(endpoint string) error {
-	if endpointPort(endpoint) != legacyIngestPort {
-		return nil
-	}
-	return fmt.Errorf("velwatch: endpoint %q uses port %s, which served the removed first-party ingest "+
-		"wire; point VELWATCH_ENDPOINT at the OTLP receiver (port %s for %q, port %s for %q)",
-		endpoint, legacyIngestPort, defaultOTLPPort, protocolOTLP, defaultOTLPHTTPPort, protocolOTLPHTTP)
-}
-
-// endpointPort extracts the port from an endpoint, which may be a bare
-// host:port or a full URL. It returns "" when the endpoint carries no port.
-func endpointPort(endpoint string) string {
-	hostport := endpoint
-	if i := strings.Index(hostport, "://"); i >= 0 {
-		hostport = hostport[i+3:]
-	}
-	if i := strings.IndexAny(hostport, "/?#"); i >= 0 {
-		hostport = hostport[:i]
-	}
-	if i := strings.LastIndex(hostport, "@"); i >= 0 {
-		hostport = hostport[i+1:]
-	}
-	_, port, err := net.SplitHostPort(hostport)
-	if err != nil {
-		return ""
-	}
-	return port
 }
 
 // Shutdown gracefully shuts down the SDK, flushing any remaining events.

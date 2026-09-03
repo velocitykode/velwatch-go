@@ -80,8 +80,8 @@ func TestInitLegacyProtocolFails(t *testing.T) {
 	}
 }
 
-// The removed wire is rejected on its own port too, where the endpoint check
-// would otherwise be the first thing to fire.
+// The removed wire is rejected by protocol, whatever endpoint it is pointed
+// at, including the port the platform serves OTLP/gRPC on.
 func TestInitLegacyProtocolOnLegacyPortFails(t *testing.T) {
 	config := testConfig()
 	config.Protocol = legacyProtocol
@@ -114,53 +114,22 @@ func TestInitUnknownProtocolFails(t *testing.T) {
 	}
 }
 
-func TestInitLegacyEndpointWithOTLPFails(t *testing.T) {
+// The platform serves OTLP/gRPC on port 50051, so an OTLP endpoint on that
+// port is a valid local or self-hosted configuration, not a stale one.
+func TestInitOTLPOnPort50051Succeeds(t *testing.T) {
 	config := testConfig()
-	config.Endpoint = "ingest.velwatch.com:50051" // legacy port, OTLP default
+	config.Protocol = protocolOTLP
+	config.Endpoint = "localhost:50051"
 
-	_, err := initForTest(t, config)
-	if err == nil {
-		t.Fatal("expected an error for a legacy endpoint under OTLP, got nil")
+	sdk, err := initForTest(t, config)
+	if err != nil {
+		t.Fatalf("initLocked returned error: %v", err)
 	}
-	for _, want := range []string{"50051", defaultOTLPPort, protocolOTLP} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q should mention %q", err, want)
-		}
+	if sdk.config.Endpoint != "localhost:50051" {
+		t.Errorf("Endpoint = %q, want %q", sdk.config.Endpoint, "localhost:50051")
 	}
-}
-
-func TestValidateEndpoint(t *testing.T) {
-	cases := []struct {
-		endpoint string
-		wantErr  bool
-	}{
-		{"localhost:4317", false},
-		{"ingest.velwatch.com", false},
-		{"localhost:50051", true},
-		{"https://ingest.velwatch.com:50051/v1/traces", true},
-		{"https://ingest.velwatch.com:4318/v1/traces", false},
-	}
-	for _, c := range cases {
-		err := validateEndpoint(c.endpoint)
-		if (err != nil) != c.wantErr {
-			t.Errorf("validateEndpoint(%q) error = %v, wantErr %v", c.endpoint, err, c.wantErr)
-		}
-	}
-}
-
-func TestEndpointPort(t *testing.T) {
-	cases := []struct{ endpoint, want string }{
-		{"localhost:4317", "4317"},
-		{"ingest.velwatch.com", ""},
-		{"https://ingest.velwatch.com:4318/v1/traces", "4318"},
-		{"http://user:pass@host:50051/path", "50051"},
-		{"[::1]:4317", "4317"},
-		{"https://ingest.velwatch.com/v1/traces", ""},
-	}
-	for _, c := range cases {
-		if got := endpointPort(c.endpoint); got != c.want {
-			t.Errorf("endpointPort(%q) = %q, want %q", c.endpoint, got, c.want)
-		}
+	if _, ok := sdk.exporter.(*OTLPExporter); !ok {
+		t.Errorf("exporter = %T, want *OTLPExporter", sdk.exporter)
 	}
 }
 
