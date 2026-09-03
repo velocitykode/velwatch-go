@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `VELWATCH_PROTOCOL=grpc` selects the legacy Velwatch `EventService` wire. It
   still works, and now logs a deprecation warning once per process at startup.
-  The wire will be removed in a future major version (VW-43).
+  The wire is scheduled for removal in the next major version.
 
 ### Migration
 

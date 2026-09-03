@@ -106,12 +106,12 @@ func TestInitLegacyGRPCWarnsOnce(t *testing.T) {
 
 	warnings := 0
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		if strings.Contains(line, "VW-43") {
+		if strings.Contains(line, "scheduled for removal in the next major version") {
 			warnings++
 		}
 	}
 	if warnings != 1 {
-		t.Errorf("got %d deprecation warnings naming VW-43, want 1 (log: %q)", warnings, buf.String())
+		t.Errorf("got %d deprecation warnings naming the removal, want 1 (log: %q)", warnings, buf.String())
 	}
 	if !strings.Contains(buf.String(), "deprecated") {
 		t.Errorf("warning should call the wire deprecated, got %q", buf.String())

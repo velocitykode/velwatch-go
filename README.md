@@ -51,7 +51,7 @@ defer velwatch.Shutdown()
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `Endpoint` | string | required | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP) |
+| `Endpoint` | string | per protocol | Ingest endpoint (host:port for OTLP/gRPC, URL for OTLP/HTTP); defaults to `localhost:4317` for `otlp`, `localhost:4318` for `otlphttp`, `localhost:50051` for `grpc` |
 | `Token` | string | required | Project API token (vw_xxx), sent as a Bearer token |
 | `ServiceName` | string | required | Service name for identification |
 | `Protocol` | string | `otlp` | Wire protocol: `otlp`, `otlphttp`, or `grpc` (deprecated) |
@@ -108,7 +108,7 @@ VELWATCH_ENDPOINT=velwatch.example.com:50051
 ```
 
 The legacy wire logs a deprecation warning once per process on startup and will
-be removed in a future major version (VW-43).
+is scheduled for removal in the next major version.
 
 Because the default flipped, an endpoint on the legacy port `50051` paired with
 an OTLP protocol is rejected at initialization with an explicit error instead of

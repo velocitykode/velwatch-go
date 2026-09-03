@@ -297,7 +297,7 @@ var legacyProtocolOnce sync.Once
 func warnLegacyProtocol() {
 	legacyProtocolOnce.Do(func() {
 		log.Printf("velwatch: protocol %q selects the legacy EventService wire, which is deprecated "+
-			"and will be removed in a future major version (VW-43). Unset VELWATCH_PROTOCOL to use "+
+			"and is scheduled for removal in the next major version. Unset VELWATCH_PROTOCOL to use "+
 			"the OTLP default, and point VELWATCH_ENDPOINT at the OTLP receiver port %s.",
 			protocolGRPC, defaultOTLPPort)
 	})
