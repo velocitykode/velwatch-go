@@ -3,6 +3,7 @@ package velwatch
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -283,12 +284,46 @@ func installLogCapture(config Config) *logHandler {
 	logMaxLines.Store(int64(config.LogMaxLines))
 
 	previous := slog.Default()
-	handler := newLogHandler(previous.Handler(), config.LogLevel)
+	handler := newLogHandler(forwardTarget(previous), config.LogLevel)
 	installedLogHandler = handler
 	previousDefaultLogger = previous
 	logCaptureOn.Store(true)
 	slog.SetDefault(slog.New(handler))
 	return handler
+}
+
+// forwardTarget returns the handler capture forwards every record to: the
+// application's own handler when it installed one, else a text handler on the
+// writer slog's built-in default was printing to.
+//
+// The built-in default handler is never wrapped. It does not write to a
+// writer; it hands each line to the stdlib log package, and the moment any
+// non-builtin handler becomes the slog default, Go points the stdlib log
+// package's output back at that default. Wrapping it therefore builds a loop:
+// slog.Warn -> capture -> builtin -> log.Output (locks) -> capture -> builtin
+// -> log.Output (locks again) -> deadlock on the first line the application
+// or the framework logs. Velocity core logs through slog in places, so every
+// velocity app that never called slog.SetDefault would hang at its first
+// request. Forwarding to a text handler on the same writer keeps the
+// application's lines flowing to the same place, in slog's text form.
+func forwardTarget(previous *slog.Logger) slog.Handler {
+	if previous == nil {
+		return nil
+	}
+	if !isBuiltinDefaultHandler(previous.Handler()) {
+		return previous.Handler()
+	}
+	// The builtin default writes at stdlib log's level of "everything", but
+	// slog's default logger only builds records at LevelInfo and above, so
+	// Info is the level the application was effectively getting.
+	return slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelInfo})
+}
+
+// isBuiltinDefaultHandler reports whether h is slog's unexported default
+// handler, the one in place when no application code ever called
+// slog.SetDefault. The type is unexported, so it is matched by name.
+func isBuiltinDefaultHandler(h slog.Handler) bool {
+	return fmt.Sprintf("%T", h) == "*slog.defaultHandler"
 }
 
 // uninstallLogCapture restores the slog default that was in place before
