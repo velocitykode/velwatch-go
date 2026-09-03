@@ -31,6 +31,9 @@
 //	                        logged, e.g. "750ms" (default "1s")
 //	VELWATCH_LOG_MAX_LINES  log lines one span buffers before only error
 //	                        lines are still captured (default 50)
+//	VELWATCH_LOG_LEVEL      lowest level captured: "debug", "info", "warn" or
+//	                        "error" (default "info"; the application's own
+//	                        logging is unaffected)
 //	VELWATCH_RELEASE        deployed service version (OTLP service.version)
 //	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
 //
@@ -44,6 +47,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -136,6 +140,15 @@ type Config struct {
 	// current slog default handler is wrapped rather than replaced, so the
 	// application's own logging keeps working.
 	LogCapture bool
+
+	// LogLevel is the lowest level captured onto a span. Lines below it are
+	// never buffered and never exported; they are still handed to the
+	// application's own slog handler, so the floor governs capture only and
+	// never what the application logs. Refused lines are counted on
+	// SpanLogs.DroppedByFloor and reported on the span's record as
+	// "log.dropped". The zero value is slog.LevelInfo, which is the default.
+	// Resolved from VELWATCH_LOG_LEVEL ("debug", "info", "warn", "error").
+	LogLevel slog.Level
 
 	// LogMaxLines is the most log lines one span will buffer. Once a span
 	// reaches it, only error lines are still captured, so a span that logs

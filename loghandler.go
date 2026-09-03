@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,22 +35,37 @@ type logHandler struct {
 
 	// prefix is the dotted prefix built by WithGroup calls, e.g. "db.query.".
 	prefix string
+
+	// floor is the lowest level captured onto a span. It governs capture
+	// only: a record below it is still forwarded to next, so the
+	// application's own logging is untouched.
+	floor slog.Level
 }
 
 var _ slog.Handler = (*logHandler)(nil)
 
-// newLogHandler returns a capture handler that forwards to next. next may be
-// nil, in which case records are only captured.
-func newLogHandler(next slog.Handler) *logHandler {
-	return &logHandler{next: next}
+// newLogHandler returns a capture handler that forwards to next and captures
+// records at floor and above. next may be nil, in which case records are only
+// captured.
+func newLogHandler(next slog.Handler, floor slog.Level) *logHandler {
+	return &logHandler{next: next, floor: floor}
 }
 
-// Enabled reports whether a record at this level should be built. Capture
-// takes every level, so the answer is always yes: the level a line is kept at
-// is decided when the buffered lines are filtered, not here. The tee still
-// respects the wrapped handler's own level, so the application's output does
-// not change.
-func (h *logHandler) Enabled(context.Context, slog.Level) bool { return true }
+// Enabled reports whether a record at this level should be built. It is yes
+// at or above the capture floor, and otherwise whatever the wrapped handler
+// says: the floor decides what capture keeps, never what the application
+// logs, so a debug record the application still wants is built and forwarded
+// even though capture will not buffer it. A record no one wants is never
+// built at all, which is the cheapest outcome available.
+func (h *logHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	if level >= h.floor {
+		return true
+	}
+	if h.next != nil {
+		return h.next.Enabled(ctx, level)
+	}
+	return false
+}
 
 // Handle forwards the record to the wrapped handler, then buffers it on the
 // span active on ctx.
@@ -64,6 +80,13 @@ func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 	logs := SpanLogsFrom(ctx)
 	if logs == nil {
 		logsDroppedOutsideSpan.Add(1)
+		return err
+	}
+
+	// Below the capture floor the record has already been forwarded above,
+	// so the application keeps its line; capture just does not buffer it.
+	if r.Level < h.floor {
+		logs.dropByFloor()
 		return err
 	}
 
@@ -86,7 +109,7 @@ func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 		Message: r.Message,
 		Attrs:   attrs,
 	}) {
-		logs.drop()
+		logs.dropByCap()
 	}
 	return err
 }
@@ -127,7 +150,7 @@ func (h *logHandler) WithGroup(name string) slog.Handler {
 func (h *logHandler) clone() *logHandler {
 	attrs := make([]flatAttr, len(h.attrs), len(h.attrs)+4)
 	copy(attrs, h.attrs)
-	return &logHandler{next: h.next, attrs: attrs, prefix: h.prefix}
+	return &logHandler{next: h.next, attrs: attrs, prefix: h.prefix, floor: h.floor}
 }
 
 // flattenAttr appends a to out under prefix, expanding group values to dotted
@@ -239,7 +262,8 @@ func LogHandler() slog.Handler {
 //
 // config is the resolved configuration, so the capture limits it carries are
 // already defaulted; a zero LogMaxLines here means no cap rather than "use
-// the default", which initialization has applied by this point.
+// the default", which initialization has applied by this point. A zero
+// LogLevel is slog.LevelInfo, which is the default floor either way.
 func installLogCapture(config Config) *logHandler {
 	logInstallMu.Lock()
 	defer logInstallMu.Unlock()
@@ -250,7 +274,7 @@ func installLogCapture(config Config) *logHandler {
 	logMaxLines.Store(int64(config.LogMaxLines))
 
 	previous := slog.Default()
-	handler := newLogHandler(previous.Handler())
+	handler := newLogHandler(previous.Handler(), config.LogLevel)
 	installedLogHandler = handler
 	previousDefaultLogger = previous
 	logCaptureOn.Store(true)
@@ -273,4 +297,27 @@ func uninstallLogCapture() {
 		slog.SetDefault(previousDefaultLogger)
 		previousDefaultLogger = nil
 	}
+}
+
+// logLevelNames maps the level names VELWATCH_LOG_LEVEL accepts onto slog
+// levels. Only the four slog defines are accepted: a capture floor is a
+// coarse volume control, and inventing custom levels here would let a typo
+// like "warning" silently land between two real ones.
+var logLevelNames = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// parseLogLevel resolves a VELWATCH_LOG_LEVEL value to the capture floor it
+// names, case-insensitively. An unknown name is an error rather than a silent
+// fallback: it decides which lines a span captures at all.
+func parseLogLevel(value string) (slog.Level, error) {
+	level, ok := logLevelNames[strings.ToLower(strings.TrimSpace(value))]
+	if !ok {
+		return 0, fmt.Errorf("velwatch: VELWATCH_LOG_LEVEL %q is not a known level "+
+			"(want one of \"debug\", \"info\", \"warn\", \"error\")", value)
+	}
+	return level, nil
 }

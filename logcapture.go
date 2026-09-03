@@ -50,11 +50,13 @@ type SpanLogs struct {
 
 	// droppedByKeepRule counts lines the tail-based keep rules discarded
 	// when the span ended; droppedByCap counts lines a per-span cap refused
-	// to buffer in the first place. They are kept apart because they mean
-	// different things: the first is the SDK working as configured, the
-	// second is a span logging more than the SDK will hold.
+	// to buffer in the first place, and droppedByFloor lines the capture
+	// level floor refused. They are kept apart because they mean different
+	// things: the first is the SDK working as configured, the other two are
+	// a span offering more than the SDK was told to hold.
 	droppedByKeepRule uint64
 	droppedByCap      uint64
+	droppedByFloor    uint64
 }
 
 // TraceID returns the trace this buffer belongs to.
@@ -102,12 +104,30 @@ func (s *SpanLogs) Len() int {
 }
 
 // Dropped returns the number of lines this span produced that were not sent:
-// those the keep rules discarded when the span ended plus those a per-span cap
-// refused to buffer.
+// those the keep rules discarded when the span ended plus those the per-span
+// cap and the capture level floor refused to buffer.
 func (s *SpanLogs) Dropped() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.droppedByKeepRule + s.droppedByCap
+	return s.droppedByKeepRule + s.droppedByCap + s.droppedByFloor
+}
+
+// DroppedAtCapture returns the lines this span offered that never reached the
+// buffer: those refused by the per-span cap plus those below the capture level
+// floor. It excludes the keep rules, which run later and on lines that were
+// buffered, so the number is final as soon as the span's work is done.
+//
+// This is the quantity reported on the span's own record as "log.dropped".
+// Middleware attaches it to every request record; a job or console command
+// that brackets its own span can attach the same value to its record. It is
+// a no-op returning zero on a nil buffer.
+func (s *SpanLogs) DroppedAtCapture() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.droppedByCap + s.droppedByFloor
 }
 
 // DroppedByKeepRule returns how many buffered lines the keep rules discarded
@@ -126,11 +146,26 @@ func (s *SpanLogs) DroppedByCap() uint64 {
 	return s.droppedByCap
 }
 
-// drop records a line that was produced under this span but not buffered.
-func (s *SpanLogs) drop() {
+// DroppedByFloor returns how many lines were never buffered because they were
+// below the configured capture level floor.
+func (s *SpanLogs) DroppedByFloor() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.droppedByFloor
+}
+
+// dropByCap records a line the per-span cap refused to buffer.
+func (s *SpanLogs) dropByCap() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.droppedByCap++
+}
+
+// dropByFloor records a line the capture level floor refused to buffer.
+func (s *SpanLogs) dropByFloor() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.droppedByFloor++
 }
 
 // dropByKeepRule records n buffered lines the keep rules discarded at span end.

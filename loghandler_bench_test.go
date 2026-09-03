@@ -24,7 +24,7 @@ func (discardHandler) WithGroup(string) slog.Handler             { return discar
 // The buffer is trimmed periodically so the benchmark measures the steady
 // state rather than the cost of growing one slice to b.N entries.
 func BenchmarkLogHandlerNoopRequest(b *testing.B) {
-	handler := newLogHandler(discardHandler{})
+	handler := newLogHandler(discardHandler{}, slog.LevelInfo)
 	logger := slog.New(handler)
 
 	logs := &SpanLogs{

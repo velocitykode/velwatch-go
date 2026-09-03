@@ -88,10 +88,13 @@ func TestSpanLogsKeepRules(t *testing.T) {
 			wantDropped: 2,
 		},
 		{
+			// Every line here is at or above the capture floor, so the
+			// keep rules see all three. Lines below the floor never reach
+			// a buffer at all; that is the floor's job, tested separately.
 			name:       "healthy unsampled span with no warn sends nothing",
 			sampleRate: unsampledRate,
 			lines: []line{
-				{slog.LevelDebug, "cache lookup"},
+				{slog.LevelInfo, "cache lookup"},
 				{slog.LevelInfo, "loading order"},
 				{slog.LevelInfo, "order loaded"},
 			},
@@ -140,6 +143,9 @@ func TestSpanLogsKeepRules(t *testing.T) {
 			}
 			if got := logs.DroppedByCap(); got != 0 {
 				t.Errorf("DroppedByCap() = %d, want 0", got)
+			}
+			if got := logs.DroppedByFloor(); got != 0 {
+				t.Errorf("DroppedByFloor() = %d, want 0", got)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -546,4 +547,105 @@ func TestSpanLogsUncappedBufferKeepsEveryLine(t *testing.T) {
 	if got := logs.DroppedByCap(); got != 0 {
 		t.Errorf("DroppedByCap() = %d, want 0", got)
 	}
+}
+
+// TestCaptureFloorDropsDebugLines asserts the default floor: a debug line is
+// never buffered, while the application's own handler still receives it when
+// it asked for that level. The floor governs capture, not the application.
+func TestCaptureFloorDropsDebugLines(t *testing.T) {
+	sink := captureForTestWith(t, Config{}, slog.LevelDebug)
+	ctx, logs := tracedContext(t)
+
+	slog.DebugContext(ctx, "cache lookup")
+	slog.InfoContext(ctx, "order loaded")
+
+	if got := bufferedMessages(logs); strings.Join(got, "|") != "order loaded" {
+		t.Errorf("buffered %v, want only the info line at the default floor", got)
+	}
+	if got := logs.DroppedByFloor(); got != 1 {
+		t.Errorf("DroppedByFloor() = %d, want 1", got)
+	}
+	if got := logs.DroppedAtCapture(); got != 1 {
+		t.Errorf("DroppedAtCapture() = %d, want 1", got)
+	}
+	if got := sink.messages(); strings.Join(got, "|") != "cache lookup|order loaded" {
+		t.Errorf("the application handler saw %v, want both lines", got)
+	}
+}
+
+// TestCaptureFloorDebugCapturesDebugLines asserts VELWATCH_LOG_LEVEL=debug
+// lets debug lines through to the buffer.
+func TestCaptureFloorDebugCapturesDebugLines(t *testing.T) {
+	captureForTestWith(t, Config{LogLevel: slog.LevelDebug}, slog.LevelDebug)
+	ctx, logs := tracedContext(t)
+
+	slog.DebugContext(ctx, "cache lookup")
+	slog.InfoContext(ctx, "order loaded")
+
+	if got := bufferedMessages(logs); strings.Join(got, "|") != "cache lookup|order loaded" {
+		t.Errorf("buffered %v, want both lines at the debug floor", got)
+	}
+	if got := logs.DroppedByFloor(); got != 0 {
+		t.Errorf("DroppedByFloor() = %d, want 0", got)
+	}
+}
+
+// TestCaptureFloorLeavesQuietRecordsUnbuilt asserts a record neither the
+// application nor capture wants is never built: the handler reports it
+// disabled, so nothing is counted because nothing was produced.
+func TestCaptureFloorLeavesQuietRecordsUnbuilt(t *testing.T) {
+	sink := captureForTestWith(t, Config{}, slog.LevelInfo)
+	ctx, logs := tracedContext(t)
+
+	slog.DebugContext(ctx, "cache lookup")
+
+	if got := logs.Len(); got != 0 {
+		t.Errorf("buffered %d lines, want 0", got)
+	}
+	if got := sink.count(); got != 0 {
+		t.Errorf("the application handler saw %d records, want 0", got)
+	}
+	if got := logs.DroppedAtCapture(); got != 0 {
+		t.Errorf("DroppedAtCapture() = %d, want 0: the record was never built", got)
+	}
+}
+
+// TestCaptureFloorAndCapCountSeparately asserts the two capture counters stay
+// distinct and that DroppedAtCapture reports their sum.
+func TestCaptureFloorAndCapCountSeparately(t *testing.T) {
+	captureForTestWith(t, Config{LogMaxLines: 3}, slog.LevelDebug)
+	ctx, logs := tracedContext(t)
+
+	for i := 0; i < 5; i++ {
+		slog.InfoContext(ctx, "chatter")
+	}
+	for i := 0; i < 4; i++ {
+		slog.DebugContext(ctx, "noise")
+	}
+
+	if got := logs.Len(); got != 3 {
+		t.Errorf("buffered %d lines, want 3", got)
+	}
+	if got := logs.DroppedByCap(); got != 2 {
+		t.Errorf("DroppedByCap() = %d, want 2", got)
+	}
+	if got := logs.DroppedByFloor(); got != 4 {
+		t.Errorf("DroppedByFloor() = %d, want 4", got)
+	}
+	if got := logs.DroppedAtCapture(); got != 6 {
+		t.Errorf("DroppedAtCapture() = %d, want 6 (2 by cap plus 4 by floor)", got)
+	}
+	if got := logs.Dropped(); got != 6 {
+		t.Errorf("Dropped() = %d, want 6", got)
+	}
+}
+
+// bufferedMessages returns the message of each line buffered on logs.
+func bufferedMessages(logs *SpanLogs) []string {
+	lines := logs.Lines()
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = line.Message
+	}
+	return out
 }
