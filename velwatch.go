@@ -139,6 +139,13 @@ type Config struct {
 	// slog is left exactly as the application configured it. When on, the
 	// current slog default handler is wrapped rather than replaced, so the
 	// application's own logging keeps working.
+	//
+	// A span is active when the record's context carries a trace id: the
+	// one velocity's router, queue worker and scheduler put there, the one
+	// Middleware puts there for a plain net/http server, or one from
+	// StartSpanLogs. Velocity spans need no code: the SDK's event listeners
+	// close their buffers with the request status, job error or task error
+	// and the real duration. Resolved from VELWATCH_LOG_CAPTURE.
 	LogCapture bool
 
 	// LogLevel is the lowest level captured onto a span. Lines below it are
@@ -437,6 +444,7 @@ func (sdk *SDK) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			recordStaleSpanLogs(time.Now())
 			sdk.collector.Flush()
 		case <-sdk.ctx.Done():
 			return

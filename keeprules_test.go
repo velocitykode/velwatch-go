@@ -256,3 +256,17 @@ func TestExceptionsMarkTheSpanFailed(t *testing.T) {
 		RecordException(context.Background(), "BoomError", "boom", "")
 	})
 }
+
+func TestSetOutcomeKeepsAnEarlierFailure(t *testing.T) {
+	logs := &SpanLogs{}
+	logs.MarkFailed()
+	logs.SetOutcome(SpanOutcome{Duration: time.Millisecond})
+
+	outcome := logs.Outcome()
+	if !outcome.Failed {
+		t.Error("SetOutcome cleared a failure MarkFailed had recorded")
+	}
+	if outcome.Duration != time.Millisecond {
+		t.Errorf("Duration = %s, want 1ms", outcome.Duration)
+	}
+}
