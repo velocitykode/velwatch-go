@@ -78,6 +78,15 @@ func Middleware(next http.Handler) http.Handler {
 			event.Attributes["client_ip"] = r.RemoteAddr
 		}
 
+		// Report what log capture refused during this request: lines past
+		// the per-span cap plus lines below the capture level floor. Only
+		// when there were any, so an ordinary request carries no extra
+		// attribute, and read from the request record rather than the log
+		// records so the gap is visible even when every line was dropped.
+		if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
+			event.Attributes["log.dropped"] = dropped
+		}
+
 		sdk.collector.Add(event)
 
 		// Queue the lines logged during the request as log records, so
