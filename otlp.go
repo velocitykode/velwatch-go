@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -116,30 +117,41 @@ func buildExportRequest(events []*Event, serviceName, release, commitSHA string)
 		spans = append(spans, eventToSpan(ev))
 	}
 
-	resourceAttrs := []*commonpb.KeyValue{
+	return &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{
+			Resource: otlpResource(serviceName, release, commitSHA),
+			ScopeSpans: []*tracepb.ScopeSpans{{
+				Scope: instrumentationScope(),
+				Spans: spans,
+			}},
+		}},
+	}
+}
+
+// otlpResource builds the OTLP resource every signal this SDK exports is
+// grouped under: the service identity plus the SDK identity, with the release
+// and commit SHA riding as service.version and vcs.ref.head.revision when they
+// are known. Spans and log records share it, so a request and the lines it
+// logged describe the same service instance.
+func otlpResource(serviceName, release, commitSHA string) *resourcepb.Resource {
+	attrs := []*commonpb.KeyValue{
 		stringAttr("service.name", serviceName),
 		stringAttr("telemetry.sdk.name", sdkName),
 		stringAttr("telemetry.sdk.language", "go"),
 		stringAttr("telemetry.sdk.version", sdkVersion),
 	}
 	if release != "" {
-		resourceAttrs = append(resourceAttrs, stringAttr(otelServiceVersion, release))
+		attrs = append(attrs, stringAttr(otelServiceVersion, release))
 	}
 	if commitSHA != "" {
-		resourceAttrs = append(resourceAttrs, stringAttr(otelVCSRevision, commitSHA))
+		attrs = append(attrs, stringAttr(otelVCSRevision, commitSHA))
 	}
+	return &resourcepb.Resource{Attributes: attrs}
+}
 
-	return &coltracepb.ExportTraceServiceRequest{
-		ResourceSpans: []*tracepb.ResourceSpans{{
-			Resource: &resourcepb.Resource{
-				Attributes: resourceAttrs,
-			},
-			ScopeSpans: []*tracepb.ScopeSpans{{
-				Scope: &commonpb.InstrumentationScope{Name: sdkName, Version: sdkVersion},
-				Spans: spans,
-			}},
-		}},
-	}
+// instrumentationScope names this SDK as the scope that produced the records.
+func instrumentationScope() *commonpb.InstrumentationScope {
+	return &commonpb.InstrumentationScope{Name: sdkName, Version: sdkVersion}
 }
 
 // Close closes the gRPC connection.
@@ -291,6 +303,13 @@ func spanAttributes(ev *Event) []*commonpb.KeyValue {
 		}
 		attrs = append(attrs, anyAttr(key, v))
 	}
+	return appendTagAttributes(attrs, ev)
+}
+
+// appendTagAttributes appends an event's tags to attrs under the
+// velwatch.tag.* prefix, plus the flat copy the reserved tags still carry. It
+// is shared by spans and log records so a tag reads the same on either signal.
+func appendTagAttributes(attrs []*commonpb.KeyValue, ev *Event) []*commonpb.KeyValue {
 	for k, v := range ev.Tags {
 		if k == "" {
 			continue
@@ -363,6 +382,11 @@ func stringAttr(key, v string) *commonpb.KeyValue {
 	}}
 }
 
+// anyValue maps a Go value onto an OTLP AnyValue. Every integer kind lands on
+// IntValue, including the unsigned kinds a captured log attribute carries
+// (slog.KindUint64 normalizes to uint64): an unsigned value too large for an
+// int64 is the only one that falls back to its string form, because OTLP has
+// no wider integer to hold it. Anything else is rendered with fmt.
 func anyValue(v any) *commonpb.AnyValue {
 	switch x := v.(type) {
 	case string:
@@ -370,14 +394,40 @@ func anyValue(v any) *commonpb.AnyValue {
 	case bool:
 		return &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: x}}
 	case int:
-		return &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: int64(x)}}
+		return intValue(int64(x))
+	case int8:
+		return intValue(int64(x))
+	case int16:
+		return intValue(int64(x))
+	case int32:
+		return intValue(int64(x))
 	case int64:
-		return &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: x}}
+		return intValue(x)
+	case uint8:
+		return intValue(int64(x))
+	case uint16:
+		return intValue(int64(x))
+	case uint32:
+		return intValue(int64(x))
+	case uint:
+		if uint64(x) > math.MaxInt64 {
+			break
+		}
+		return intValue(int64(x))
+	case uint64:
+		if x > math.MaxInt64 {
+			break
+		}
+		return intValue(int64(x))
 	case float64:
 		return &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: x}}
 	case float32:
 		return &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: float64(x)}}
-	default:
-		return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: fmt.Sprintf("%v", v)}}
 	}
+	return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: fmt.Sprintf("%v", v)}}
+}
+
+// intValue wraps an int64 as an OTLP AnyValue.
+func intValue(v int64) *commonpb.AnyValue {
+	return &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: v}}
 }
