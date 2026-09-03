@@ -9,7 +9,7 @@ import (
 // Middleware returns an HTTP middleware that automatically instruments requests
 // for a plain net/http server. A velocity application does not need it: the
 // router's own request events carry the trace, and the SDK's listeners record
-// them, log lines included.
+// them.
 //
 // Usage:
 //
@@ -44,11 +44,6 @@ func Middleware(next http.Handler) http.Handler {
 			ctx = WithTraceContext(ctx, GenerateTraceID(), GenerateSpanID())
 		}
 
-		// Bind a log buffer to this request's span. No-op unless log
-		// capture is on, in which case log lines emitted under this
-		// context are buffered on the span.
-		ctx, spanLogs := StartSpanLogs(ctx)
-
 		// Create wrapped response writer to capture status code
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
 
@@ -80,28 +75,7 @@ func Middleware(next http.Handler) http.Handler {
 			event.Attributes["client_ip"] = r.RemoteAddr
 		}
 
-		// Report what log capture refused during this request: lines past
-		// the per-span cap plus lines below the capture level floor. Only
-		// when there were any, so an ordinary request carries no extra
-		// attribute, and read from the request record rather than the log
-		// records so the gap is visible even when every line was dropped.
-		if dropped := spanLogs.DroppedAtCapture(); dropped > 0 {
-			event.Attributes["log.dropped"] = dropped
-		}
-
 		sdk.collector.Add(event)
-
-		// Queue the lines logged during the request as log records, so
-		// they are batched and flushed with the span above. The keep rules
-		// run here, with the status and duration the request actually had:
-		// a 5xx or a slow request keeps everything it logged, a healthy
-		// fast one on an unsampled trace keeps only warn and above. No-op
-		// unless log capture is on.
-		spanLogs.SetOutcome(SpanOutcome{
-			Failed:   wrapped.statusCode >= http.StatusInternalServerError,
-			Duration: duration,
-		})
-		RecordSpanLogs(spanLogs)
 	})
 }
 

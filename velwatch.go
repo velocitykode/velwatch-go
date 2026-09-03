@@ -24,16 +24,15 @@
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
 //	VELWATCH_FLUSH_INTERVAL flush cadence, e.g. "2s" (default 1s)
 //	VELWATCH_DISABLED       "true" disables the SDK entirely
-//	VELWATCH_LOG_CAPTURE    "true" captures log lines emitted during a span
-//	                        (default off: slog is left untouched)
-//	VELWATCH_LOG_SLOW_THRESHOLD
-//	                        a span at least this slow keeps every line it
-//	                        logged, e.g. "750ms" (default "1s")
-//	VELWATCH_LOG_MAX_LINES  log lines one span buffers before only error
-//	                        lines are still captured (default 50)
-//	VELWATCH_LOG_LEVEL      lowest level captured: "debug", "info", "warn" or
+//	VELWATCH_LOG_CAPTURE    "true" ships the lines written through the
+//	                        "velwatch" velocity log channel (default off:
+//	                        the channel drops everything)
+//	VELWATCH_LOG_LEVEL      lowest level shipped: "debug", "info", "warn" or
 //	                        "error" (default "info"; the application's own
 //	                        logging is unaffected)
+//	VELWATCH_LOG_MAX_PER_SECOND
+//	                        log lines this process ships per second before
+//	                        the rest are counted and dropped (default 1000)
 //	VELWATCH_RELEASE        deployed service version (OTLP service.version)
 //	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
 //
@@ -134,56 +133,39 @@ type Config struct {
 	// OTEL_RESOURCE_ATTRIBUTES.
 	CommitSHA string
 
-	// LogCapture installs an slog handler that captures log lines emitted
-	// while a span is active and buffers them on that span. Off by default:
-	// slog is left exactly as the application configured it. When on, the
-	// current slog default handler is wrapped rather than replaced, so the
-	// application's own logging keeps working.
+	// LogCapture turns the SDK's velocity log driver on. The driver is
+	// registered whatever this says, so an application can leave "velwatch"
+	// in its log stack permanently; with LogCapture off the channel drops
+	// every line it is handed, and nothing is shipped.
 	//
-	// A span is active when the record's context carries a trace id: the
-	// one velocity's router, queue worker and scheduler put there, the one
-	// Middleware puts there for a plain net/http server, or one from
-	// StartSpanLogs. Velocity spans need no code: the SDK's event listeners
-	// close their buffers with the request status, job error or task error
-	// and the real duration. Resolved from VELWATCH_LOG_CAPTURE.
+	// The application needs no call-site change: it keeps writing
+	// log.Info / log.Warn / log.Error as it always did, and the "velwatch"
+	// channel in its log stack forwards each line here. Resolved from
+	// VELWATCH_LOG_CAPTURE.
 	LogCapture bool
 
-	// LogLevel is the lowest level captured onto a span. Lines below it are
-	// never buffered and never exported; they are still handed to the
-	// application's own slog handler, so the floor governs capture only and
-	// never what the application logs. Refused lines are counted on
-	// SpanLogs.DroppedByFloor and reported on the span's record as
-	// "log.dropped". The zero value is slog.LevelInfo, which is the default.
-	// Resolved from VELWATCH_LOG_LEVEL ("debug", "info", "warn", "error").
+	// LogLevel is the lowest level shipped. Lines below it are dropped by
+	// the velwatch channel only: the other channels in the application's
+	// log stack still print them, so the floor is a Velwatch volume control
+	// and never changes what the application logs. The zero value is
+	// slog.LevelInfo, which is the default. Resolved from VELWATCH_LOG_LEVEL
+	// ("debug", "info", "warn", "error").
 	LogLevel slog.Level
 
-	// LogMaxLines is the most log lines one span will buffer. Once a span
-	// reaches it, only error lines are still captured, so a span that logs
-	// heavily and then fails still records the failure; error lines have
-	// another LogMaxLines of headroom past the cap and are refused beyond
-	// that, so no span buffers more than twice the cap. Lines refused by the
-	// cap are counted on SpanLogs.DroppedByCap and reported on the span's
-	// record as "log.dropped". Zero selects the default of 50; a negative
-	// value is rejected by initialization. Resolved from
-	// VELWATCH_LOG_MAX_LINES, which must be a positive integer.
-	LogMaxLines int
-
-	// LogSlowThreshold is the duration above which a span is considered slow
-	// and keeps every line it logged, whatever the trace's sampling verdict.
-	// Zero selects the default of one second; a negative value is rejected
-	// by initialization. Resolved from VELWATCH_LOG_SLOW_THRESHOLD.
-	LogSlowThreshold time.Duration
+	// LogMaxPerSecond caps how many log lines this process ships per second.
+	// Lines past the cap inside one second are counted on LogsDroppedRate
+	// and not sent, so a service that suddenly logs in a hot loop cannot
+	// flood the ingest or its own network. Zero selects the default of
+	// 1000; a negative value is rejected by initialization. Resolved from
+	// VELWATCH_LOG_MAX_PER_SECOND, which must be a positive integer.
+	LogMaxPerSecond int
 }
 
-// defaultLogMaxLines is the number of log lines one span buffers before only
-// error lines are still taken. Fifty lines is a generous request-sized story
-// while keeping the worst case a span can hold small and predictable.
-const defaultLogMaxLines = 50
-
-// defaultLogSlowThreshold is the span duration above which log capture keeps
-// every buffered line. Healthy traffic is fast, so this is the line between
-// "nothing interesting happened" and "worth the bytes".
-const defaultLogSlowThreshold = time.Second
+// defaultLogMaxPerSecond is the number of log lines one process ships per
+// second by default. A thousand lines a second is far above what a healthy
+// service writes and far below what would trouble the ingest, so it bounds a
+// runaway loop without touching ordinary traffic.
+const defaultLogMaxPerSecond = 1000
 
 var (
 	instance *SDK
@@ -203,7 +185,6 @@ type SDK struct {
 	collector *Collector
 	exporter  Exporter
 	listeners *Listeners
-	logs      *logHandler
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -243,17 +224,11 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if config.SampleRate <= 0 || config.SampleRate > 1 {
 		config.SampleRate = 1.0
 	}
-	if config.LogMaxLines < 0 {
-		return fmt.Errorf("velwatch: LogMaxLines must not be negative, got %d", config.LogMaxLines)
+	if config.LogMaxPerSecond < 0 {
+		return fmt.Errorf("velwatch: LogMaxPerSecond must not be negative, got %d", config.LogMaxPerSecond)
 	}
-	if config.LogMaxLines == 0 {
-		config.LogMaxLines = defaultLogMaxLines
-	}
-	if config.LogSlowThreshold < 0 {
-		return fmt.Errorf("velwatch: LogSlowThreshold must not be negative, got %s", config.LogSlowThreshold)
-	}
-	if config.LogSlowThreshold == 0 {
-		config.LogSlowThreshold = defaultLogSlowThreshold
+	if config.LogMaxPerSecond == 0 {
+		config.LogMaxPerSecond = defaultLogMaxPerSecond
 	}
 	if config.Protocol == "" {
 		config.Protocol = protocolOTLP
@@ -316,11 +291,9 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	// Register Velocity event listeners
 	listeners.Register()
 
-	// Install log capture last, so a failed initialization never leaves a
-	// handler wired into the application's logger.
-	if config.LogCapture {
-		sdk.logs = installLogCapture(config)
-	}
+	// Publish the log driver state last, so a failed initialization never
+	// leaves the "velwatch" log channel shipping into a half-built SDK.
+	startLogDriver(config, collector)
 
 	instance = sdk
 	return nil
@@ -410,11 +383,9 @@ func (sdk *SDK) close() error {
 			sdk.listeners.Unregister()
 		}
 
-		// Restore the logger the application had before capture was installed
-		if sdk.logs != nil {
-			uninstallLogCapture()
-			sdk.logs = nil
-		}
+		// Stop the log driver so lines written during teardown are
+		// dropped rather than queued onto a closing exporter
+		stopLogDriver()
 
 		// Stop the flush loop and wait for it to finish
 		if sdk.cancel != nil {
@@ -444,7 +415,6 @@ func (sdk *SDK) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			recordStaleSpanLogs(time.Now())
 			sdk.collector.Flush()
 		case <-sdk.ctx.Done():
 			return

@@ -1,6 +1,7 @@
 package velwatch
 
 import (
+	"encoding/hex"
 	"math"
 	"time"
 
@@ -58,8 +59,8 @@ func eventToLogRecord(ev *Event) *logspb.LogRecord {
 			StringValue: logAttrString(ev, logAttrMessage),
 		}},
 		Attributes: logRecordAttributes(ev),
-		TraceId:    decodeID(ev.TraceID, 16),
-		SpanId:     decodeID(ev.SpanID, 8),
+		TraceId:    optionalID(ev.TraceID, 16),
+		SpanId:     optionalID(ev.SpanID, 8),
 	}
 }
 
@@ -119,4 +120,19 @@ func logAttrInt(ev *Event, key string) int32 {
 		return 0
 	}
 	return int32(n)
+}
+
+// optionalID hex-decodes a trace or span id a log record may carry. Unlike
+// decodeID it never invents one: a log line without trace context goes out
+// with no ids at all, which is what keeps it traceless on the wire. A
+// malformed id is dropped for the same reason.
+func optionalID(s string, n int) []byte {
+	if s == "" {
+		return nil
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != n {
+		return nil
+	}
+	return b
 }

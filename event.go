@@ -24,9 +24,9 @@ const (
 	EventTypeMail            = "mail"
 	EventTypeScheduledTask   = "scheduled_task"
 
-	// EventTypeLog is one log line captured while a span was active. It
-	// carries the ids of that span, so the platform can show a request
-	// next to the lines it logged.
+	// EventTypeLog is one log line written by the application. It is
+	// traceless: it carries no trace, span or parent id, and is searched
+	// by service, level, message and time.
 	EventTypeLog = "log"
 )
 
@@ -130,20 +130,21 @@ func NewScheduledTaskEvent(taskName, status string, durationMs float64) *Event {
 	return e
 }
 
-// NewLogEvent creates a log event from a captured log line. The event
-// timestamp is the timestamp slog stamped on the record, not the time of the
-// conversion, so a line keeps its own position on the trace timeline however
-// long it waits in a buffer. A line with no timestamp of its own falls back to
-// the time the event is built.
+// NewLogEvent creates a log event from a log line. The event timestamp is the
+// time the line was written, not the time of the conversion, so a line keeps
+// its own position on the timeline however long it waits in a batch. A line
+// with no timestamp of its own falls back to the time the event is built.
+//
+// The event is traceless: unlike every other event kind it carries no trace
+// and no span id, because a log line is not tied to a request. The platform
+// stores it under the service, level, message and time it was written with.
 //
 // The line's flattened attributes ride as event attributes under their dotted
 // keys, alongside the reserved message, level and severity_number keys. A line
 // attribute named after one of those three is overwritten by it.
-//
-// The caller supplies the span ids; SpanLogs.Events does that for a whole
-// buffer at once.
 func NewLogEvent(line LogLine) *Event {
 	e := NewEvent(EventTypeLog)
+	e.SpanID = ""
 	if !line.Time.IsZero() {
 		e.Timestamp = line.Time
 	}

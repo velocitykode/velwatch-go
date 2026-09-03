@@ -50,11 +50,10 @@ func autoBoot(s *app.Services) error {
 // velocity.New() loads .env before boot hooks run, so values from the
 // application's .env file are visible here.
 //
-// A malformed VELWATCH_LOG_SLOW_THRESHOLD, VELWATCH_LOG_MAX_LINES or
-// VELWATCH_LOG_LEVEL is an error rather than a silent fallback: they decide
-// which log lines a span keeps, so a typo there would quietly change what the
-// service ships. The older numeric variables keep their historical lenient
-// parsing.
+// A malformed VELWATCH_LOG_LEVEL or VELWATCH_LOG_MAX_PER_SECOND is an error
+// rather than a silent fallback: they decide which log lines the service
+// ships, so a typo there would quietly change its output. The older numeric
+// variables keep their historical lenient parsing.
 func configFromEnv() (Config, error) {
 	cfg := Config{
 		// Left empty when unset: the default depends on the protocol and is
@@ -89,28 +88,17 @@ func configFromEnv() (Config, error) {
 		}
 		cfg.LogLevel = level
 	}
-	if v := os.Getenv("VELWATCH_LOG_MAX_LINES"); v != "" {
+	if v := os.Getenv("VELWATCH_LOG_MAX_PER_SECOND"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_LINES %q is not a valid integer "+
-				"(want a positive count such as \"50\")", v)
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_PER_SECOND %q is not a valid integer "+
+				"(want a positive count such as \"1000\")", v)
 		}
 		if n <= 0 {
-			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_LINES %q must be a positive integer "+
+			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_MAX_PER_SECOND %q must be a positive integer "+
 				"(the cap cannot be disabled; raise it instead)", v)
 		}
-		cfg.LogMaxLines = n
-	}
-	if v := os.Getenv("VELWATCH_LOG_SLOW_THRESHOLD"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_SLOW_THRESHOLD %q is not a valid duration "+
-				"(want a Go duration such as \"750ms\" or \"2s\")", v)
-		}
-		if d < 0 {
-			return Config{}, fmt.Errorf("velwatch: VELWATCH_LOG_SLOW_THRESHOLD %q must not be negative", v)
-		}
-		cfg.LogSlowThreshold = d
+		cfg.LogMaxPerSecond = n
 	}
 	return cfg, nil
 }

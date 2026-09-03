@@ -446,3 +446,21 @@ func TestAnyValueIntegerKinds(t *testing.T) {
 		t.Errorf("oversize uint64 = %q, want its decimal string", huge.GetStringValue())
 	}
 }
+
+func TestLogRecordFromNewLogEventCarriesNoIDs(t *testing.T) {
+	event := NewLogEvent(LogLine{Time: time.Now(), Level: slog.LevelInfo, Message: "traceless"})
+	req := buildExportLogsRequest([]*Event{event}, "api", "", "")
+	record := req.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	if len(record.GetTraceId()) != 0 || len(record.GetSpanId()) != 0 {
+		t.Fatalf("log record carries ids: trace=%x span=%x", record.GetTraceId(), record.GetSpanId())
+	}
+}
+
+func TestOptionalIDKeepsAWellFormedID(t *testing.T) {
+	if got := optionalID("0123456789abcdef", 8); len(got) != 8 {
+		t.Fatalf("optionalID dropped a valid id, got %x", got)
+	}
+	if got := optionalID("zz", 8); got != nil {
+		t.Fatalf("optionalID kept a malformed id, got %x", got)
+	}
+}
