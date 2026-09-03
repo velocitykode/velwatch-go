@@ -41,7 +41,15 @@ type SpanLogs struct {
 
 	mu      sync.Mutex
 	lines   []LogLine
-	dropped uint64
+	outcome SpanOutcome
+
+	// droppedByKeepRule counts lines the tail-based keep rules discarded
+	// when the span ended; droppedByCap counts lines a per-span cap refused
+	// to buffer in the first place. They are kept apart because they mean
+	// different things: the first is the SDK working as configured, the
+	// second is a span logging more than the SDK will hold.
+	droppedByKeepRule uint64
+	droppedByCap      uint64
 }
 
 // TraceID returns the trace this buffer belongs to.
@@ -80,19 +88,46 @@ func (s *SpanLogs) Len() int {
 	return len(s.lines)
 }
 
-// Dropped returns the number of lines this span produced that were not
-// buffered, for example once a per-span cap is in place.
+// Dropped returns the number of lines this span produced that were not sent:
+// those the keep rules discarded when the span ended plus those a per-span cap
+// refused to buffer.
 func (s *SpanLogs) Dropped() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.dropped
+	return s.droppedByKeepRule + s.droppedByCap
+}
+
+// DroppedByKeepRule returns how many buffered lines the keep rules discarded
+// when the span ended.
+func (s *SpanLogs) DroppedByKeepRule() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.droppedByKeepRule
+}
+
+// DroppedByCap returns how many lines were never buffered because the span
+// had already reached its per-span cap.
+func (s *SpanLogs) DroppedByCap() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.droppedByCap
 }
 
 // drop records a line that was produced under this span but not buffered.
 func (s *SpanLogs) drop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dropped++
+	s.droppedByCap++
+}
+
+// dropByKeepRule records n buffered lines the keep rules discarded at span end.
+func (s *SpanLogs) dropByKeepRule(n uint64) {
+	if n == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.droppedByKeepRule += n
 }
 
 // spanLogsKey is the context key the per-span buffer is carried under.

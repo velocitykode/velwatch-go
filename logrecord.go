@@ -54,8 +54,13 @@ func (s *SpanLogs) Events() []*Event {
 	if s == nil {
 		return nil
 	}
-	lines := s.Lines()
-	if len(lines) == 0 {
+	return s.eventsFrom(s.Lines())
+}
+
+// eventsFrom converts the given lines, which the caller has already taken
+// from this buffer and possibly filtered, into log events.
+func (s *SpanLogs) eventsFrom(lines []LogLine) []*Event {
+	if s == nil || len(lines) == 0 {
 		return nil
 	}
 
@@ -73,15 +78,21 @@ func (s *SpanLogs) Events() []*Event {
 	return events
 }
 
-// RecordSpanLogs converts the lines buffered on logs into log records and
-// queues them on the SDK pipeline, so they are batched and flushed with the
-// span they belong to. Call it once, where the span ends:
+// RecordSpanLogs applies the keep rules to the lines buffered on logs and
+// queues the survivors as log records, so they are batched and flushed with
+// the span they belong to. Call it once, where the span ends:
 //
 //	ctx, logs := velwatch.StartSpanLogs(ctx)
 //	defer velwatch.RecordSpanLogs(logs)
 //
-// Middleware does this for every instrumented request. A job, a console
-// command or any other span brackets itself the same way.
+// The decision is tail-based, so tell the buffer how the span ended first
+// (SpanLogs.SetOutcome) to get the failed and slow rules; without an outcome
+// a span is treated as healthy and fast. A failed or slow span keeps every
+// line, warn and above is always kept, and the rest survive only when the
+// trace is sampled. Discarded lines are counted on SpanLogs.DroppedByKeepRule.
+//
+// Middleware does this for every instrumented request, outcome included. A
+// job, a console command or any other span brackets itself the same way.
 //
 // It is a no-op on a nil buffer and while the SDK is dormant or disabled, so
 // the call costs nothing in a build that never turns log capture on.
@@ -97,7 +108,16 @@ func RecordSpanLogs(logs *SpanLogs) {
 		return
 	}
 
-	for _, event := range logs.Events() {
+	lines := logs.Lines()
+	if len(lines) == 0 {
+		return
+	}
+
+	kept, dropped := applyKeepRules(lines, logs.Outcome(), logs.TraceID(),
+		sdk.config.LogSlowThreshold, sdk.config.SampleRate)
+	logs.dropByKeepRule(dropped)
+
+	for _, event := range logs.eventsFrom(kept) {
 		event.setDefaultTag("service", sdk.config.ServiceName)
 		sdk.collector.Add(event)
 	}

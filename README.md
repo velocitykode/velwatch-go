@@ -222,6 +222,7 @@ VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
 VELWATCH_INSECURE=true           # Disable TLS (local dev)
 VELWATCH_DISABLED=true           # Disable the SDK entirely
 VELWATCH_LOG_CAPTURE=true        # Capture log lines emitted during a span (default off)
+VELWATCH_LOG_SLOW_THRESHOLD=1s   # A span slower than this keeps every line it logged
 ```
 
 With `VELWATCH_LOG_CAPTURE=true` the SDK wraps the current `slog` default
@@ -245,6 +246,28 @@ defer velwatch.RecordSpanLogs(logs)
 ```
 
 Both calls are no-ops while log capture is off.
+
+Which of the buffered lines are actually sent is decided when the span ends,
+so healthy traffic ships almost nothing:
+
+1. the span failed (a 5xx response, a recorded exception or panic, a job or
+   command that returned an error) - every line is kept;
+2. the span was slower than `VELWATCH_LOG_SLOW_THRESHOLD` (a Go duration,
+   default `1s`; an invalid value fails initialization) - every line is kept;
+3. warn and above is always kept;
+4. everything else survives only when the trace is sampled at
+   `VELWATCH_SAMPLE_RATE`. The verdict is derived from the trace id, so every
+   span of a trace agrees and the ingest service reaches the same answer.
+
+Discarded lines are counted on `SpanLogs.DroppedByKeepRule()`, which
+`SpanLogs.Dropped()` reports together with any lines a per-span cap refused.
+`Middleware` passes the real status and duration itself. Tell the buffer how
+any other span ended before recording it:
+
+```go
+logs.SetOutcome(velwatch.SpanOutcome{Failed: err != nil, Duration: time.Since(start)})
+velwatch.RecordSpanLogs(logs)
+```
 
 Captured lines are exported as OTLP `LogRecord`s over the same connection as
 the spans they belong to, on both `otlp` (the `LogsService` on the trace gRPC
