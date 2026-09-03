@@ -649,3 +649,23 @@ func bufferedMessages(logs *SpanLogs) []string {
 	}
 	return out
 }
+
+// TestSpanLogsCapBoundsErrorsToo pins the hard ceiling: past the cap only
+// error lines are taken, and past twice the cap nothing is, so a span that
+// logs an error per loop iteration is still bounded.
+func TestSpanLogsCapBoundsErrorsToo(t *testing.T) {
+	const maxLines = 50
+	captureForTestWith(t, Config{LogMaxLines: maxLines}, slog.LevelInfo)
+	ctx, logs := tracedContext(t)
+
+	for i := 0; i < 500; i++ {
+		slog.ErrorContext(ctx, "boom")
+	}
+
+	if got := logs.Len(); got != 2*maxLines {
+		t.Fatalf("buffered %d lines, want %d (the cap plus the error headroom)", got, 2*maxLines)
+	}
+	if got := logs.DroppedByCap(); got != 500-2*maxLines {
+		t.Errorf("DroppedByCap() = %d, want %d", got, 500-2*maxLines)
+	}
+}

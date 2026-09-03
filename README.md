@@ -284,8 +284,9 @@ buffer, so a request that logs in a loop cannot hold unbounded memory:
 - `VELWATCH_LOG_MAX_LINES` (default `50`) is the most lines one span buffers.
   Past the ceiling only error lines are still taken, so a span that emits five
   hundred info lines and then fails still records the error that explains it.
-  The cap must be a positive integer and cannot be switched off; raise it
-  instead.
+  Error lines get the same number of lines again as headroom and are refused
+  past that, so a span never buffers more than twice the cap. The cap must be
+  a positive integer and cannot be switched off; raise it instead.
 
 Both are applied at capture time, before the keep rules above, and an invalid
 value for either fails initialization with an error naming the variable.
