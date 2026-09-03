@@ -72,3 +72,33 @@ func (s *SpanLogs) Events() []*Event {
 	}
 	return events
 }
+
+// RecordSpanLogs converts the lines buffered on logs into log records and
+// queues them on the SDK pipeline, so they are batched and flushed with the
+// span they belong to. Call it once, where the span ends:
+//
+//	ctx, logs := velwatch.StartSpanLogs(ctx)
+//	defer velwatch.RecordSpanLogs(logs)
+//
+// Middleware does this for every instrumented request. A job, a console
+// command or any other span brackets itself the same way.
+//
+// It is a no-op on a nil buffer and while the SDK is dormant or disabled, so
+// the call costs nothing in a build that never turns log capture on.
+func RecordSpanLogs(logs *SpanLogs) {
+	if logs == nil {
+		return
+	}
+
+	mu.Lock()
+	sdk := instance
+	mu.Unlock()
+	if sdk == nil || sdk.config.Disabled || sdk.collector == nil {
+		return
+	}
+
+	for _, event := range logs.Events() {
+		event.setDefaultTag("service", sdk.config.ServiceName)
+		sdk.collector.Add(event)
+	}
+}

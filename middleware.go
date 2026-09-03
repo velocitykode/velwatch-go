@@ -45,7 +45,7 @@ func Middleware(next http.Handler) http.Handler {
 		// Bind a log buffer to this request's span. No-op unless log
 		// capture is on, in which case log lines emitted under this
 		// context are buffered on the span.
-		ctx, _ = StartSpanLogs(ctx)
+		ctx, spanLogs := StartSpanLogs(ctx)
 
 		// Create wrapped response writer to capture status code
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
@@ -79,6 +79,11 @@ func Middleware(next http.Handler) http.Handler {
 		}
 
 		sdk.collector.Add(event)
+
+		// Queue the lines logged during the request as log records, so
+		// they are batched and flushed with the span above. No-op unless
+		// log capture is on.
+		RecordSpanLogs(spanLogs)
 	})
 }
 

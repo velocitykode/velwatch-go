@@ -231,6 +231,21 @@ span are dropped. Left unset, `slog` is untouched. Applications that build
 their own logger can wrap the handler themselves with `velwatch.LogHandler()`,
 which returns `nil` when capture is off.
 
+When the span ends, its buffered lines are queued as `log` records carrying
+the trace, span and parent ids of that span, so they are batched and flushed
+alongside it. Each record holds the message, the lowercase level, its OTLP
+severity number and the line attributes flattened to dotted keys
+(`db.query.table`); its timestamp is the one `slog` stamped on the record, not
+the flush time. `Middleware` brackets every request itself. A job, a console
+command or any other span does the same in two lines:
+
+```go
+ctx, logs := velwatch.StartSpanLogs(ctx)
+defer velwatch.RecordSpanLogs(logs)
+```
+
+Both calls are no-ops while log capture is off.
+
 ## Testing
 
 Disable the SDK during tests by leaving `VELWATCH_TOKEN` unset (the SDK stays

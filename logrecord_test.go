@@ -3,6 +3,9 @@ package velwatch
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -204,4 +207,156 @@ func TestLogLevelMapping(t *testing.T) {
 			t.Errorf("logSeverityNumber(%v) = %d, want %d", tc.level, got, tc.severity)
 		}
 	}
+}
+
+// capturingExporter records the batches it is handed. It implements
+// LogRecordExporter, so the collector routes log records to it.
+type capturingExporter struct {
+	mu      sync.Mutex
+	spans   []*Event
+	records []*Event
+}
+
+func (e *capturingExporter) Export(events []*Event) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.spans = append(e.spans, events...)
+	return nil
+}
+
+func (e *capturingExporter) ExportLogRecords(events []*Event) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.records = append(e.records, events...)
+	return nil
+}
+
+func (e *capturingExporter) Close() error { return nil }
+
+func (e *capturingExporter) counts() (spans, records int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.spans), len(e.records)
+}
+
+// spanOnlyExporter ships spans and cannot ship log records.
+type spanOnlyExporter struct {
+	mu    sync.Mutex
+	spans []*Event
+}
+
+func (e *spanOnlyExporter) Export(events []*Event) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.spans = append(e.spans, events...)
+	return nil
+}
+
+func (e *spanOnlyExporter) Close() error { return nil }
+
+func (e *spanOnlyExporter) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.spans)
+}
+
+func TestCollectorRoutesLogRecordsToLogExporter(t *testing.T) {
+	exporter := &capturingExporter{}
+	collector := NewCollector(exporter, 3, time.Hour)
+
+	collector.Add(NewRequestEvent("GET", "/orders", 200, 4))
+	collector.Add(NewLogEvent(LogLine{Time: time.Now(), Level: slog.LevelInfo, Message: "one"}))
+	collector.Add(NewLogEvent(LogLine{Time: time.Now(), Level: slog.LevelError, Message: "two"}))
+
+	// The batch flushes on a background goroutine once it is full.
+	waitFor(t, func() bool {
+		spans, records := exporter.counts()
+		return spans == 1 && records == 2
+	}, "exporter to receive 1 span and 2 log records")
+}
+
+func TestCollectorCountsLogRecordsAnExporterCannotShip(t *testing.T) {
+	exporter := &spanOnlyExporter{}
+	collector := NewCollector(exporter, 2, time.Hour)
+
+	before := LogRecordsDropped()
+	collector.Add(NewRequestEvent("GET", "/orders", 200, 4))
+	collector.Add(NewLogEvent(LogLine{Time: time.Now(), Level: slog.LevelInfo, Message: "unshippable"}))
+
+	waitFor(t, func() bool { return exporter.count() == 1 }, "exporter to receive the span")
+	waitFor(t, func() bool { return LogRecordsDropped()-before == 1 }, "the log record to be counted as dropped")
+}
+
+func TestMiddlewareQueuesLogRecordsWithTheRequest(t *testing.T) {
+	captureForTest(t)
+
+	config := testConfig()
+	config.LogCapture = true
+	config.BatchSize = 1000
+	config.FlushInterval = time.Hour
+	sdk, err := initForTest(t, config)
+	if err != nil {
+		t.Fatalf("initLocked returned error: %v", err)
+	}
+
+	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		slog.InfoContext(ctx, "handling request", "path", r.URL.Path)
+		slog.WarnContext(ctx, "slow dependency", slog.Group("db", slog.String("host", "primary")))
+		w.WriteHeader(http.StatusOK)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/orders", nil))
+
+	var requests, logs []*Event
+	for _, event := range getEvents(sdk.collector) {
+		if event.Type == EventTypeLog {
+			logs = append(logs, event)
+			continue
+		}
+		requests = append(requests, event)
+	}
+
+	if len(requests) != 1 {
+		t.Fatalf("queued %d request events, want 1", len(requests))
+	}
+	if len(logs) != 2 {
+		t.Fatalf("queued %d log records, want 2", len(logs))
+	}
+
+	traceID := requests[0].TraceID
+	spanID := requests[0].SpanID
+	if traceID == "" || spanID == "" {
+		t.Fatalf("request event carries %q/%q, want a trace and span id", traceID, spanID)
+	}
+	for i, event := range logs {
+		if event.TraceID != traceID {
+			t.Errorf("log record %d TraceID = %q, want the request's %q", i, event.TraceID, traceID)
+		}
+		if event.SpanID != spanID {
+			t.Errorf("log record %d SpanID = %q, want the request's %q", i, event.SpanID, spanID)
+		}
+		if event.Tags["service"] != config.ServiceName {
+			t.Errorf("log record %d service tag = %q, want %q", i, event.Tags["service"], config.ServiceName)
+		}
+	}
+	if logs[0].Attributes["message"] != "handling request" || logs[0].Attributes["level"] != "info" {
+		t.Errorf("first record = %v, want the info line", logs[0].Attributes)
+	}
+	if logs[1].Attributes["level"] != "warn" || logs[1].Attributes["db.host"] != "primary" {
+		t.Errorf("second record = %v, want the warn line with db.host", logs[1].Attributes)
+	}
+}
+
+// waitFor polls condition until it holds or the test times out.
+func waitFor(t *testing.T, condition func() bool, what string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

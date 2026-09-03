@@ -59,7 +59,29 @@ func (c *Collector) flushLocked() {
 	c.events = make([]*Event, 0, c.batchSize)
 
 	// Send asynchronously to avoid blocking
-	go c.exporter.Export(events)
+	go c.export(events)
+}
+
+// export hands a batch to the exporter, split by kind: span events go to
+// Export, log records to ExportLogRecords when the exporter implements
+// LogRecordExporter. Both halves of one batch leave together, so a request's
+// log lines are shipped with the span they were emitted in.
+func (c *Collector) export(events []*Event) {
+	if c.exporter == nil {
+		return
+	}
+
+	spans, logs := splitLogEvents(events)
+	if len(logs) > 0 {
+		if exporter, ok := c.exporter.(LogRecordExporter); ok {
+			_ = exporter.ExportLogRecords(logs)
+		} else {
+			logRecordsDropped.Add(uint64(len(logs)))
+		}
+	}
+	if len(spans) > 0 {
+		_ = c.exporter.Export(spans)
+	}
 }
 
 // Len returns the current number of batched events
