@@ -81,8 +81,15 @@ func Middleware(next http.Handler) http.Handler {
 		sdk.collector.Add(event)
 
 		// Queue the lines logged during the request as log records, so
-		// they are batched and flushed with the span above. No-op unless
-		// log capture is on.
+		// they are batched and flushed with the span above. The keep rules
+		// run here, with the status and duration the request actually had:
+		// a 5xx or a slow request keeps everything it logged, a healthy
+		// fast one on an unsampled trace keeps only warn and above. No-op
+		// unless log capture is on.
+		spanLogs.SetOutcome(SpanOutcome{
+			Failed:   wrapped.statusCode >= http.StatusInternalServerError,
+			Duration: duration,
+		})
 		RecordSpanLogs(spanLogs)
 	})
 }
