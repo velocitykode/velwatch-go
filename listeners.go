@@ -228,6 +228,13 @@ func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
 	if e.Error == nil {
 		return nil
 	}
+
+	// A failed request keeps every log line it wrote, whether or not this
+	// exception event itself is sampled: the keep rules read the outcome when
+	// the span ends, and the middleware only sees the status code, which a
+	// recovered panic may well have rendered as a tidy 500 page.
+	SpanLogsFrom(e.Context).MarkFailed()
+
 	if !l.shouldSample() {
 		return nil
 	}
@@ -674,7 +681,9 @@ func (l *Listeners) onScheduledTaskFailed(e *scheduler.ScheduledTaskFailed) erro
 	return nil
 }
 
-// RecordException manually records an exception event
+// RecordException manually records an exception event. It also marks the
+// span active on ctx as failed, so the log lines buffered under it survive
+// the keep rules when the span ends (see SpanLogs.MarkFailed).
 func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	mu.Lock()
 	sdk := instance
@@ -683,6 +692,8 @@ func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	if sdk == nil || sdk.config.Disabled || sdk.collector == nil {
 		return
 	}
+
+	SpanLogsFrom(ctx).MarkFailed()
 
 	event := NewExceptionEvent(errType, message, stackTrace)
 

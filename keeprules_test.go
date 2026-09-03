@@ -1,10 +1,15 @@
 package velwatch
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/velocitykode/velocity/events"
+	"github.com/velocitykode/velocity/router"
 )
 
 // unsampledRate is a sample rate low enough that no trace id these tests
@@ -212,4 +217,42 @@ func TestTraceSampledIsDeterministicAndProportional(t *testing.T) {
 	if kept < total/8 || kept > total*3/8 {
 		t.Errorf("kept %d of %d traces at rate 0.25, want roughly a quarter", kept, total)
 	}
+}
+
+// TestExceptionsMarkTheSpanFailed pins the "a recorded exception or panic
+// fails the span" half of the keep rules: neither RecordException nor the
+// request.failed listener needs the middleware's status code to keep the
+// span's lines, and the mark lands even when the exception event itself is
+// sampled out.
+func TestExceptionsMarkTheSpanFailed(t *testing.T) {
+	captureForTest(t)
+	if _, err := initForTest(t, keepRulesConfig(unsampledRate)); err != nil {
+		t.Fatalf("initLocked returned error: %v", err)
+	}
+
+	t.Run("RecordException", func(t *testing.T) {
+		ctx, logs := tracedContext(t)
+		RecordException(ctx, "BoomError", "boom", "")
+		if !logs.Outcome().Failed {
+			t.Error("RecordException left the span healthy, want it marked failed")
+		}
+	})
+
+	t.Run("request.failed listener", func(t *testing.T) {
+		ctx, logs := tracedContext(t)
+		unsampled := NewListeners(testCollector(), events.NewDispatcher(), "test-service", 0.0)
+		if err := unsampled.onRequestFailed(&router.RequestFailed{
+			Context: ctx,
+			Error:   errors.New("boom"),
+		}); err != nil {
+			t.Fatalf("onRequestFailed returned error: %v", err)
+		}
+		if !logs.Outcome().Failed {
+			t.Error("request.failed left the span healthy, want it marked failed even when the event is sampled out")
+		}
+	})
+
+	t.Run("nil buffer is a no-op", func(t *testing.T) {
+		RecordException(context.Background(), "BoomError", "boom", "")
+	})
 }
