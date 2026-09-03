@@ -55,6 +55,7 @@ func configFromEnv() Config {
 		Protocol:    envOr("VELWATCH_PROTOCOL", protocolOTLP),
 		Insecure:    os.Getenv("VELWATCH_INSECURE") == "true",
 		Disabled:    os.Getenv("VELWATCH_DISABLED") == "true",
+		LogCapture:  os.Getenv("VELWATCH_LOG_CAPTURE") == "true",
 	}
 	if v := os.Getenv("VELWATCH_SAMPLE_RATE"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {

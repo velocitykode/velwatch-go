@@ -221,7 +221,15 @@ VELWATCH_BATCH_SIZE=100          # Events per batch
 VELWATCH_FLUSH_INTERVAL=1s       # Flush cadence
 VELWATCH_INSECURE=true           # Disable TLS (local dev)
 VELWATCH_DISABLED=true           # Disable the SDK entirely
+VELWATCH_LOG_CAPTURE=true        # Capture log lines emitted during a span (default off)
 ```
+
+With `VELWATCH_LOG_CAPTURE=true` the SDK wraps the current `slog` default
+handler, so the application's own logging keeps working and log lines emitted
+while a span is active are buffered on that span; lines emitted outside any
+span are dropped. Left unset, `slog` is untouched. Applications that build
+their own logger can wrap the handler themselves with `velwatch.LogHandler()`,
+which returns `nil` when capture is off.
 
 ## Testing
 

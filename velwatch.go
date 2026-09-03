@@ -24,6 +24,8 @@
 //	VELWATCH_BATCH_SIZE     events per batch (default 100)
 //	VELWATCH_FLUSH_INTERVAL flush cadence, e.g. "2s" (default 1s)
 //	VELWATCH_DISABLED       "true" disables the SDK entirely
+//	VELWATCH_LOG_CAPTURE    "true" captures log lines emitted during a span
+//	                        (default off: slog is left untouched)
 //	VELWATCH_RELEASE        deployed service version (OTLP service.version)
 //	VELWATCH_COMMIT_SHA     VCS revision (OTLP vcs.ref.head.revision)
 //
@@ -122,6 +124,13 @@ type Config struct {
 	// resolved from VELWATCH_COMMIT_SHA, then from vcs.ref.head.revision in
 	// OTEL_RESOURCE_ATTRIBUTES.
 	CommitSHA string
+
+	// LogCapture installs an slog handler that captures log lines emitted
+	// while a span is active and buffers them on that span. Off by default:
+	// slog is left exactly as the application configured it. When on, the
+	// current slog default handler is wrapped rather than replaced, so the
+	// application's own logging keeps working.
+	LogCapture bool
 }
 
 var (
@@ -142,6 +151,7 @@ type SDK struct {
 	collector *Collector
 	exporter  Exporter
 	listeners *Listeners
+	logs      *logHandler
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -242,6 +252,12 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	// Register Velocity event listeners
 	listeners.Register()
 
+	// Install log capture last, so a failed initialization never leaves a
+	// handler wired into the application's logger.
+	if config.LogCapture {
+		sdk.logs = installLogCapture()
+	}
+
 	instance = sdk
 	return nil
 }
@@ -328,6 +344,12 @@ func (sdk *SDK) close() error {
 		// Unregister listeners first so no new events arrive during teardown
 		if sdk.listeners != nil {
 			sdk.listeners.Unregister()
+		}
+
+		// Restore the logger the application had before capture was installed
+		if sdk.logs != nil {
+			uninstallLogCapture()
+			sdk.logs = nil
 		}
 
 		// Stop the flush loop and wait for it to finish

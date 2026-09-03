@@ -42,6 +42,11 @@ func Middleware(next http.Handler) http.Handler {
 			ctx = WithTraceContext(ctx, GenerateTraceID(), GenerateSpanID())
 		}
 
+		// Bind a log buffer to this request's span. No-op unless log
+		// capture is on, in which case log lines emitted under this
+		// context are buffered on the span.
+		ctx, _ = StartSpanLogs(ctx)
+
 		// Create wrapped response writer to capture status code
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
 
