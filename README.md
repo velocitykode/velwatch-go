@@ -90,6 +90,15 @@ OTLP is the ingest contract going forward. With `VELWATCH_PROTOCOL` unset the
 SDK builds the OTLP/gRPC exporter and `VELWATCH_ENDPOINT` defaults to
 `localhost:4317`.
 
+The endpoint default follows the protocol, so each wire reaches its own
+standard receiver port when `VELWATCH_ENDPOINT` is left unset:
+
+| `VELWATCH_PROTOCOL` | Default `VELWATCH_ENDPOINT` |
+|---------------------|-----------------------------|
+| `otlp` (default)    | `localhost:4317`            |
+| `otlphttp`          | `localhost:4318`            |
+| `grpc` (deprecated) | `localhost:50051`           |
+
 To keep the deprecated legacy `EventService` wire, opt back in explicitly and
 point the endpoint at its port:
 
@@ -199,7 +208,7 @@ The SDK respects the following environment variables:
 
 ```bash
 VELWATCH_TOKEN=vw_xxx            # Project API token (unset = SDK dormant)
-VELWATCH_ENDPOINT=host:port      # Ingest endpoint (default localhost:4317)
+VELWATCH_ENDPOINT=host:port      # Ingest endpoint (default per protocol: 4317 otlp, 4318 otlphttp, 50051 grpc)
 VELWATCH_SERVICE_NAME=my-api     # Service name (default APP_NAME)
 VELWATCH_PROTOCOL=otlp           # Wire protocol: otlp (default) | otlphttp | grpc (deprecated)
 VELWATCH_SAMPLE_RATE=0.5         # Sample rate (0.0-1.0)

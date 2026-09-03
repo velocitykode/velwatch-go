@@ -47,7 +47,9 @@ func autoBoot(s *app.Services) error {
 // application's .env file are visible here.
 func configFromEnv() Config {
 	cfg := Config{
-		Endpoint:    envOr("VELWATCH_ENDPOINT", defaultEndpoint),
+		// Left empty when unset: the default depends on the protocol and is
+		// applied during initialization, once the protocol is resolved.
+		Endpoint:    os.Getenv("VELWATCH_ENDPOINT"),
 		Token:       os.Getenv("VELWATCH_TOKEN"),
 		ServiceName: envOr("VELWATCH_SERVICE_NAME", os.Getenv("APP_NAME")),
 		Protocol:    envOr("VELWATCH_PROTOCOL", protocolOTLP),

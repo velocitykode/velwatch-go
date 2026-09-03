@@ -194,10 +194,49 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	}
 
 	cfg := configFromEnv()
-	if cfg.Endpoint != defaultEndpoint {
-		t.Errorf("Endpoint = %q, want %q", cfg.Endpoint, defaultEndpoint)
+	// The endpoint default is per-protocol, so configFromEnv leaves it empty
+	// and initialization fills it in once the protocol is resolved.
+	if cfg.Endpoint != "" {
+		t.Errorf("Endpoint = %q, want empty", cfg.Endpoint)
 	}
 	if cfg.Protocol != protocolOTLP {
 		t.Errorf("Protocol = %q, want %q", cfg.Protocol, protocolOTLP)
+	}
+}
+
+func TestDefaultEndpointIsPerProtocol(t *testing.T) {
+	cases := []struct{ protocol, want string }{
+		{protocolOTLP, "localhost:4317"},
+		{protocolOTLPHTTP, "localhost:4318"},
+		{protocolGRPC, "localhost:50051"},
+	}
+	for _, c := range cases {
+		if got := defaultEndpointFor(c.protocol); got != c.want {
+			t.Errorf("defaultEndpointFor(%q) = %q, want %q", c.protocol, got, c.want)
+		}
+	}
+}
+
+func TestInitAppliesPerProtocolDefaultEndpoint(t *testing.T) {
+	cases := []struct{ protocol, want string }{
+		{"", "localhost:4317"}, // unset protocol resolves to otlp
+		{protocolOTLP, "localhost:4317"},
+		{protocolOTLPHTTP, "localhost:4318"},
+		{protocolGRPC, "localhost:50051"},
+	}
+	for _, c := range cases {
+		t.Run(c.protocol, func(t *testing.T) {
+			config := testConfig()
+			config.Protocol = c.protocol
+			config.Endpoint = "" // no VELWATCH_ENDPOINT configured
+
+			sdk, err := initForTest(t, config)
+			if err != nil {
+				t.Fatalf("initLocked returned error: %v", err)
+			}
+			if sdk.config.Endpoint != c.want {
+				t.Errorf("Endpoint = %q, want %q", sdk.config.Endpoint, c.want)
+			}
+		})
 	}
 }

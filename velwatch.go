@@ -13,7 +13,9 @@
 // Environment variables:
 //
 //	VELWATCH_TOKEN          project API token (required; unset = SDK dormant)
-//	VELWATCH_ENDPOINT       ingest endpoint (default "localhost:4317")
+//	VELWATCH_ENDPOINT       ingest endpoint (default per protocol:
+//	                        "localhost:4317" for "otlp", "localhost:4318" for
+//	                        "otlphttp", "localhost:50051" for "grpc")
 //	VELWATCH_SERVICE_NAME   service name in traces (default APP_NAME)
 //	VELWATCH_PROTOCOL       wire protocol: "otlp" (OTLP/gRPC), "otlphttp"
 //	                        (OTLP/HTTP), or "grpc" (deprecated legacy
@@ -59,20 +61,36 @@ const (
 	// defaultOTLPPort is the standard OTLP/gRPC receiver port.
 	defaultOTLPPort = "4317"
 
-	// defaultEndpoint is the endpoint used when VELWATCH_ENDPOINT is unset.
-	defaultEndpoint = "localhost:" + defaultOTLPPort
+	// defaultOTLPHTTPPort is the standard OTLP/HTTP receiver port.
+	defaultOTLPHTTPPort = "4318"
 
 	// legacyGRPCPort is the port the deprecated EventService listens on.
 	// An endpoint on this port paired with an OTLP protocol is a misconfig.
 	legacyGRPCPort = "50051"
 )
 
+// defaultEndpointFor returns the local endpoint used when none is configured.
+// The default is per-protocol: each wire listens on its own standard port, so
+// a protocol chosen without an endpoint still reaches the right receiver.
+func defaultEndpointFor(protocol string) string {
+	switch protocol {
+	case protocolOTLPHTTP:
+		return "localhost:" + defaultOTLPHTTPPort
+	case protocolGRPC:
+		return "localhost:" + legacyGRPCPort
+	default:
+		return "localhost:" + defaultOTLPPort
+	}
+}
+
 // Config contains configuration options for the Velwatch SDK
 type Config struct {
 	// Endpoint is the Velwatch ingest endpoint. For the OTLP protocols this
 	// is the OTLP receiver (e.g., "velwatch.example.com:4317", or a URL for
 	// "otlphttp"); for the deprecated "grpc" protocol it is the EventService
-	// address (e.g., "velwatch.example.com:50051").
+	// address (e.g., "velwatch.example.com:50051"). When empty it defaults to
+	// the local receiver for the selected protocol: "localhost:4317" for
+	// "otlp", "localhost:4318" for "otlphttp", "localhost:50051" for "grpc".
 	Endpoint string
 
 	// Token is the project API token (e.g., "vw_xxx...")
@@ -176,6 +194,11 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	if config.Protocol == "" {
 		config.Protocol = protocolOTLP
 	}
+	// The endpoint default depends on the protocol, so it is resolved only
+	// after the protocol is known.
+	if config.Endpoint == "" {
+		config.Endpoint = defaultEndpointFor(config.Protocol)
+	}
 
 	// Resolve release/commit metadata once, honoring explicit config over
 	// VELWATCH_* env over OTEL_RESOURCE_ATTRIBUTES.
@@ -190,9 +213,6 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 	// Validate required fields
 	if dispatcher == nil {
 		return errors.New("velwatch: a Velocity app with an event dispatcher is required")
-	}
-	if config.Endpoint == "" {
-		return errors.New("velwatch: Endpoint is required")
 	}
 	if config.Token == "" {
 		return errors.New("velwatch: Token is required")
