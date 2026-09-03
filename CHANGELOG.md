@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-04
+
 This release removes a wire protocol and is therefore a breaking change: it
-ships as the next major version.
+ships as the next minor version, this being a pre-1.0 module.
+
+### Added
+
+- **Log capture through a velocity log driver.** The SDK registers a `velwatch`
+  driver with velocity's log registry. Add it to the app's stack channel
+  (`LOG_DRIVER=stack`, `LOG_STACK=console,velwatch`) and set
+  `VELWATCH_LOG_CAPTURE=true`: every line the application already writes
+  through velocity `log` ships as an OTLP log record, with no call-site
+  changes. Lines are traceless: they carry the service, timestamp, level,
+  message and attributes, never a trace or span id. `VELWATCH_LOG_LEVEL` sets
+  the lowest level shipped and `VELWATCH_LOG_MAX_PER_SECOND` caps the volume
+  per process; refusals are counted by `LogsDroppedRate()`.
 
 ### Breaking
 
