@@ -54,12 +54,9 @@ func (l *Listeners) Register() {
 		}
 		return nil
 	})
-	l.registerRawListener("request.failed", func(e interface{}) error {
-		if r, ok := e.(*router.RequestFailed); ok {
-			return l.onRequestFailed(r)
-		}
-		return nil
-	})
+	// Request errors are not taken from request.failed: they arrive through
+	// the error reporter (reporter.go), which the app's error handler calls
+	// once per reported error.
 
 	// Database query events
 	l.registerRawListener("query.executed", func(e interface{}) error {
@@ -229,50 +226,6 @@ func eventTraceIDs(ctx context.Context, traceID, spanID string) (string, string)
 		spanID = GetSpanID(ctx)
 	}
 	return traceID, spanID
-}
-
-// onRequestFailed records the error detail for a failed request as an
-// exception event only. The request record itself comes from the
-// request.handled event, which the router fires for every request
-// (including failed ones) with the real status code and duration; emitting
-// a request event here too would double-count failed requests. The two
-// events share RequestID/TraceID/SpanID, so the exception stays correlated
-// with its request record.
-func (l *Listeners) onRequestFailed(e *router.RequestFailed) error {
-	if e.Error == nil {
-		return nil
-	}
-
-	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
-		return nil
-	}
-
-	if traceID == "" {
-		traceID = GenerateTraceID()
-	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
-	}
-
-	exEvent := NewExceptionEvent(
-		"RequestError",
-		e.Error.Error(),
-		e.Stack,
-	)
-	exEvent.TraceID = traceID
-	exEvent.SpanID = spanID
-	exEvent.Tags["service"] = l.serviceName
-	exEvent.Attributes["method"] = e.Method
-	exEvent.Attributes["path"] = e.Path
-	exEvent.Attributes["request_id"] = e.RequestID
-	if e.Recovered {
-		exEvent.Attributes["recovered"] = true
-	}
-	l.collector.Add(exEvent)
-
-	return nil
 }
 
 // Database Query Handlers

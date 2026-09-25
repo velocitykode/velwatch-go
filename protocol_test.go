@@ -8,12 +8,13 @@ import (
 )
 
 // initForTest runs the shared initialization against a throwaway dispatcher
-// and tears the resulting instance down when the test ends.
+// (and no error handler) and tears the resulting instance down when the test
+// ends.
 func initForTest(t *testing.T, config Config) (*SDK, error) {
 	t.Helper()
 
 	mu.Lock()
-	err := initLocked(events.NewDispatcher(), config)
+	err := initLocked(events.NewDispatcher(), nil, config)
 	sdk := instance
 	mu.Unlock()
 

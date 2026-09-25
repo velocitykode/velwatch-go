@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires velocity v0.83.0** (and Go 1.26.6, which that release requires).
+- **Exceptions come from the app's error handler, not `request.failed`.** The
+  SDK adds a reporter to `app.Services.Errors` (`contract.ErrorHandler`) when
+  it initializes, from the boot hook or `Init`, and no longer listens to
+  `request.failed`. Each error the handler reports becomes one exception
+  event: request errors keep the `RequestError` type and the method, path,
+  request id and `recovered` attributes. Two kinds of report are new: errors a
+  handler reports with `ctx.Report` (type `RequestError`), and reports made
+  outside a request, such as failed queue jobs and scheduled tasks (type
+  `Error`). Errors the application ignores or throttles
+  through its error handler, and 4xx answers, no longer reach Velwatch. An
+  application that calls `SetReporters` on its error handler removes the SDK's
+  reporter; use `AddReporter` instead.
+
 ## [0.3.0] - 2026-09-04
 
 This release removes a wire protocol and is therefore a breaking change: it

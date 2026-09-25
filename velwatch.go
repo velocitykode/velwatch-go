@@ -185,6 +185,7 @@ type SDK struct {
 	collector *Collector
 	exporter  Exporter
 	listeners *Listeners
+	reporter  *errorReporter
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -202,14 +203,18 @@ func Init(app *velocity.App, config Config) error {
 	defer mu.Unlock()
 
 	var dispatcher contract.Dispatcher
+	var errs contract.ErrorHandler
 	if app != nil {
 		dispatcher = app.Services.Events
+		errs = app.Services.Errors
 	}
-	return initLocked(dispatcher, config)
+	return initLocked(dispatcher, errs, config)
 }
 
-// initLocked performs the shared initialization. mu must be held.
-func initLocked(dispatcher contract.Dispatcher, config Config) error {
+// initLocked performs the shared initialization. mu must be held. dispatcher
+// is the app's event dispatcher the listeners attach to; errs is the app's
+// error handler the SDK's error reporter is added to (nil records no errors).
+func initLocked(dispatcher contract.Dispatcher, errs contract.ErrorHandler, config Config) error {
 	if instance != nil {
 		return ErrAlreadyInitialized
 	}
@@ -290,6 +295,14 @@ func initLocked(dispatcher contract.Dispatcher, config Config) error {
 
 	// Register Velocity event listeners
 	listeners.Register()
+
+	// Record the errors the app's error handler reports: every handler
+	// error and recovered panic the router's error boundary reports, once
+	// each, plus the pipeline's other reports.
+	if errs != nil {
+		sdk.reporter = newErrorReporter(listeners)
+		errs.AddReporter(sdk.reporter)
+	}
 
 	// Publish the log driver state last, so a failed initialization never
 	// leaves the "velwatch" log channel shipping into a half-built SDK.
@@ -378,7 +391,10 @@ func (sdk *SDK) close() error {
 			return
 		}
 
-		// Unregister listeners first so no new events arrive during teardown
+		// Stop the error reporter and unregister listeners first so no new
+		// events arrive during teardown. The error handler keeps the
+		// reporter (it has no removal), so a stopped one drops reports.
+		sdk.reporter.stop()
 		if sdk.listeners != nil {
 			sdk.listeners.Unregister()
 		}

@@ -18,7 +18,8 @@ func init() {
 }
 
 // autoBoot initializes the SDK from environment variables against the
-// app's event dispatcher, then registers the SDK as an app component so
+// app's event dispatcher and error handler (s.Errors, which gets the SDK's
+// error reporter), then registers the SDK as an app component so
 // App.Shutdown's ShutdownAware sweep flushes and closes it.
 func autoBoot(s *app.Services) error {
 	cfg, err := configFromEnv()
@@ -36,7 +37,7 @@ func autoBoot(s *app.Services) error {
 		mu.Unlock()
 		return nil
 	}
-	err = initLocked(s.Events, cfg)
+	err = initLocked(s.Events, s.Errors, cfg)
 	sdk := instance
 	mu.Unlock()
 	if err != nil {

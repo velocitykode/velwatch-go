@@ -117,8 +117,8 @@ gRPC receiver on that port, so `VELWATCH_ENDPOINT=localhost:50051` with
 The SDK automatically instruments the following Velocity framework events:
 
 ### HTTP Requests
-- `request.handled` - Captures method, path, status code, duration
-- `request.failed` - Captures errors and exceptions
+- `request.handled` - Captures method, path, status code, duration (failed
+  requests included; their errors arrive as exceptions, see below)
 
 ### Database Queries
 - `query.executed` - Captures query, duration, row count
@@ -130,7 +130,28 @@ The SDK automatically instruments the following Velocity framework events:
 - `cache.write` - Captures cache writes
 
 ### Exceptions
-- `exception.reported` - Captures errors with stack traces
+
+Errors are captured through the app's error handler, not an event: the SDK
+adds a reporter to it (`contract.ErrorHandler.AddReporter`) when it
+initializes, so every error the handler reports becomes one exception event.
+That covers each handler error that does not carry a status below 500 and
+every recovered panic (a panic arrives once, flagged `recovered`, with its
+stack), errors a handler reports itself with `ctx.Report`, and the handler's
+other reports, such as failed queue jobs and scheduled tasks. A request error
+(exception type `RequestError`) carries the request's method, path and request
+id and shares its trace and span ids, so it stays tied to the request record;
+a report made outside a request has the type `Error`.
+
+What the handler does not report never arrives: a 4xx answer (a not-found, a
+validation failure, an error an application map rule turns into a 4xx), an
+error the application ignores (`problem.Ignore`, `problem.IgnoreIs`,
+`IgnoreIf`) or throttles, and a request whose client went away. A returned
+error carries no stack of its own; outside debug mode only a panic's exception
+has one.
+
+If the application configures its error handler with `App.Errors`, add
+reporters with `h.AddReporter(...)`. `h.SetReporters(...)` replaces every
+reporter, the SDK's included, and exceptions then stop reaching Velwatch.
 
 ## Manual Instrumentation
 
