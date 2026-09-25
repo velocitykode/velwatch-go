@@ -102,6 +102,22 @@ func TestEventToSpan_ExceptionSpanEvent(t *testing.T) {
 	if _, ok := attrMap(span.Attributes)["type"]; ok {
 		t.Error("raw 'type' attribute should not appear on the span")
 	}
+	// The envelope marker tells the collector this span IS the exception, so
+	// it stores one exception record with this span's identity instead of an
+	// extra generic span record.
+	if v := attrMap(span.Attributes)[attrExceptionEnvelope]; v.GetBoolValue() != true {
+		t.Errorf("%s = %v, want true", attrExceptionEnvelope, v)
+	}
+	if span.Kind != tracepb.Span_SPAN_KIND_INTERNAL {
+		t.Errorf("kind = %v, want INTERNAL (the marker is the contract, not the kind)", span.Kind)
+	}
+}
+
+func TestEventToSpan_NonExceptionHasNoEnvelopeMarker(t *testing.T) {
+	span := eventToSpan(NewRequestEvent("GET", "/users", 200, 12))
+	if _, ok := attrMap(span.Attributes)[attrExceptionEnvelope]; ok {
+		t.Errorf("%s must only appear on exception spans", attrExceptionEnvelope)
+	}
 }
 
 func TestEventToSpan_TagsBecomeAttributes(t *testing.T) {

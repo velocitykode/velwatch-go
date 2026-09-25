@@ -32,7 +32,9 @@ func TestErrorReporter_Report(t *testing.T) {
 		wantAttrs map[string]any
 		noAttrs   []string
 		wantTrace string
-		wantSpan  string
+		// wantParent is the span the exception parents onto: the span the
+		// report was made under. The exception keeps its own span id.
+		wantParent string
 	}{
 		{
 			name: "recovered panic in a request",
@@ -46,11 +48,11 @@ func TestErrorReporter_Report(t *testing.T) {
 				Recovered:  true,
 				PanicStack: "goroutine 1 [running]:\nmain.boom()",
 			},
-			wantType:  "RequestError",
-			wantStack: "goroutine 1 [running]:\nmain.boom()",
-			wantAttrs: map[string]any{"method": "GET", "path": "/boom", "request_id": "req-1", "recovered": true},
-			wantTrace: "trace-1",
-			wantSpan:  "span-1",
+			wantType:   "RequestError",
+			wantStack:  "goroutine 1 [running]:\nmain.boom()",
+			wantAttrs:  map[string]any{"method": "GET", "path": "/boom", "request_id": "req-1", "recovered": true},
+			wantTrace:  "trace-1",
+			wantParent: "span-1",
 		},
 		{
 			name: "returned error in a request",
@@ -62,11 +64,12 @@ func TestErrorReporter_Report(t *testing.T) {
 				Method:    "POST",
 				URL:       "/orders",
 			},
-			wantType:  "RequestError",
-			wantAttrs: map[string]any{"method": "POST", "path": "/orders", "request_id": "req-2"},
-			noAttrs:   []string{"recovered"},
-			wantTrace: "trace-2",
-			wantSpan:  "span-2",
+			// recovered is always a real bool, false for a returned error, so
+			// consumers can tell "not a panic" from "not reported".
+			wantType:   "RequestError",
+			wantAttrs:  map[string]any{"method": "POST", "path": "/orders", "request_id": "req-2", "recovered": false},
+			wantTrace:  "trace-2",
+			wantParent: "span-2",
 		},
 		{
 			name: "structured stack when no panic stack",
@@ -86,14 +89,16 @@ func TestErrorReporter_Report(t *testing.T) {
 			err:       errors.New("job exhausted its retries"),
 			ec:        &contract.ErrorContext{TraceID: "trace-3"},
 			wantType:  "Error",
-			noAttrs:   []string{"method", "path", "request_id", "recovered"},
+			wantAttrs: map[string]any{"recovered": false},
+			noAttrs:   []string{"method", "path", "request_id"},
 			wantTrace: "trace-3",
 		},
 		{
-			name:     "nil context",
-			err:      errors.New("console failure"),
-			wantType: "Error",
-			noAttrs:  []string{"method", "path", "request_id", "recovered"},
+			name:      "nil context",
+			err:       errors.New("console failure"),
+			wantType:  "Error",
+			wantAttrs: map[string]any{"recovered": false},
+			noAttrs:   []string{"method", "path", "request_id"},
 		},
 	}
 	for _, tt := range tests {
@@ -136,11 +141,21 @@ func TestErrorReporter_Report(t *testing.T) {
 			if ev.TraceID == "" {
 				t.Error("TraceID is empty, want one generated")
 			}
-			if tt.wantSpan != "" && ev.SpanID != tt.wantSpan {
-				t.Errorf("SpanID = %q, want %q", ev.SpanID, tt.wantSpan)
-			}
+			// The exception is its own child span: it never reuses the span
+			// the report names (two records, one span id, is invalid OTLP)
+			// and parents onto it instead.
 			if ev.SpanID == "" {
 				t.Error("SpanID is empty, want one generated")
+			}
+			if tt.wantParent != "" {
+				if ev.SpanID == tt.wantParent {
+					t.Errorf("SpanID = %q, want a unique id, not the reported span", ev.SpanID)
+				}
+				if ev.ParentID == nil || *ev.ParentID != tt.wantParent {
+					t.Errorf("ParentID = %v, want %q", ev.ParentID, tt.wantParent)
+				}
+			} else if ev.ParentID != nil {
+				t.Errorf("ParentID = %q, want none when the report names no span", *ev.ParentID)
 			}
 		})
 	}
@@ -210,8 +225,9 @@ func TestInit_AddsReporterToErrorHandler(t *testing.T) {
 	if _, ok := byRequest["req-404"]; ok {
 		t.Error("the 404 reached the reporter, want the handler's gate to keep it out")
 	}
-	if ev := byRequest["req-500"]; ev == nil || ev.Attributes["recovered"] != nil {
-		t.Errorf("5xx event = %+v, want one without the recovered flag", ev)
+	// recovered is always a real bool: false on a returned error.
+	if ev := byRequest["req-500"]; ev == nil || ev.Attributes["recovered"] != false {
+		t.Errorf("5xx event = %+v, want one with recovered false", ev)
 	}
 	if ev := byRequest["req-panic"]; ev == nil || ev.Attributes["recovered"] != true ||
 		!strings.HasPrefix(ev.Attributes["stack_trace"].(string), "goroutine 7") {

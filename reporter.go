@@ -57,23 +57,29 @@ func (r *errorReporter) stop() {
 // onErrorReported records one reported error as an exception event. The
 // request record itself comes from the request.handled event, which the
 // router fires for every request (including failed ones) with the real
-// status code and duration; the exception carries the same request, trace
-// and span IDs, so it stays correlated with that record.
+// status code and duration; emitting a request event here too would
+// double-count failed requests.
+//
+// The exception is its own CHILD span under the span the report names (the
+// request span for a request report): it keeps the unique SpanID from
+// NewEvent and parents onto ec.SpanID. It must NOT reuse that span ID: two
+// records sharing a span ID is invalid OTLP and collapses the two nodes.
+// Sharing the trace ID keeps it correlated with its request, and on the wire
+// eventToSpan marks it with velocity.exception.envelope, so the collector
+// stores it as one exception record with this span's own id and parent.
 func (l *Listeners) onErrorReported(err error, ec *contract.ErrorContext) {
 	if ec == nil {
 		ec = &contract.ErrorContext{}
 	}
 
-	if !l.shouldSample() {
-		return
-	}
-
-	traceID, spanID := ec.TraceID, ec.SpanID
+	traceID := ec.TraceID
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	// The same per-trace draw the request's own record took, so a kept
+	// request keeps its exception and a dropped one drops it.
+	if !l.sampleTrace(traceID) {
+		return
 	}
 
 	errType := exceptionTypeOther
@@ -83,7 +89,12 @@ func (l *Listeners) onErrorReported(err error, ec *contract.ErrorContext) {
 
 	exEvent := NewExceptionEvent(errType, err.Error(), reportedStack(ec))
 	exEvent.TraceID = traceID
-	exEvent.SpanID = spanID
+	// ErrorContext carries no parent id of its own, so the framework parent
+	// childParent would prefer is always empty here: the parent is the span
+	// the report was made under, when it names one.
+	if parentID := childParent(ec.SpanID, ""); parentID != "" {
+		exEvent.ParentID = &parentID
+	}
 	exEvent.Tags["service"] = l.serviceName
 	if ec.Method != "" {
 		exEvent.Attributes["method"] = ec.Method
@@ -91,9 +102,9 @@ func (l *Listeners) onErrorReported(err error, ec *contract.ErrorContext) {
 		exEvent.Attributes["path"] = ec.URL
 		exEvent.Attributes["request_id"] = ec.RequestID
 	}
-	if ec.Recovered {
-		exEvent.Attributes["recovered"] = true
-	}
+	// Always emit recovered as a real bool so consumers can distinguish
+	// false (a returned error) from missing.
+	exEvent.Attributes["recovered"] = ec.Recovered
 	l.collector.Add(exEvent)
 }
 

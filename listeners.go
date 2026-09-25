@@ -2,7 +2,9 @@ package velwatch
 
 import (
 	"context"
+	"hash/fnv"
 	"math/rand"
+	"time"
 
 	"github.com/velocitykode/velocity/cache"
 	"github.com/velocitykode/velocity/contract"
@@ -65,6 +67,12 @@ func (l *Listeners) Register() {
 		}
 		return nil
 	})
+	l.registerRawListener("query.failed", func(e interface{}) error {
+		if q, ok := e.(*orm.QueryFailed); ok {
+			return l.onQueryFailed(q)
+		}
+		return nil
+	})
 
 	// Cache events - use raw listeners due to OnEvent wrapper issue
 	l.registerRawListener("cache.hit", func(e interface{}) error {
@@ -82,6 +90,18 @@ func (l *Listeners) Register() {
 	l.registerRawListener("cache.written", func(e interface{}) error {
 		if c, ok := e.(*cache.CacheWritten); ok {
 			return l.onCacheWritten(c)
+		}
+		return nil
+	})
+	l.registerRawListener("cache.forgotten", func(e interface{}) error {
+		if c, ok := e.(*cache.CacheForgotten); ok {
+			return l.onCacheForgotten(c)
+		}
+		return nil
+	})
+	l.registerRawListener("cache.operation.failed", func(e interface{}) error {
+		if c, ok := e.(*cache.CacheOperationFailed); ok {
+			return l.onCacheOperationFailed(c)
 		}
 		return nil
 	})
@@ -175,20 +195,70 @@ func (l *Listeners) registerRawListener(eventName string, handler func(event int
 	l.listenerIDs = append(l.listenerIDs, id)
 }
 
-// shouldSample returns true if this request should be sampled
-func (l *Listeners) shouldSample() bool {
+// sampleTrace makes a single, deterministic, all-or-nothing sampling decision
+// for an entire trace. Every event that carries the same trace_id hashes to the
+// same value, so a trace is either fully kept or fully dropped - no more
+// partial traces where a request is kept but half its queries are dropped (or
+// vice versa). This replaces the old per-event rand.Float64() coin flip, and
+// it is the one sampling decision in the SDK: every listener here and the
+// error reporter (reporter.go) draw through it, so an exception is kept
+// exactly when the request it belongs to is.
+//
+// Events with no trace context (traceID == "") cannot be correlated to a trace,
+// so they fall back to an independent per-event random decision at the same
+// rate; there is no shared trace to be consistent with.
+func (l *Listeners) sampleTrace(traceID string) bool {
 	if l.sampleRate >= 1.0 {
 		return true
 	}
-	return rand.Float64() < l.sampleRate
+	if l.sampleRate <= 0 {
+		return false
+	}
+	if traceID == "" {
+		return rand.Float64() < l.sampleRate
+	}
+	// fnv-1a over the trace ID yields a stable 64-bit value; the top 53 bits
+	// map to a uniform float in [0,1). fnv (a non-crypto hash) is the right
+	// tool here - sampling wants speed and determinism, not cryptographic
+	// strength - and velocity exposes no sampling/hashing primitive to prefer.
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(traceID))
+	frac := float64(h.Sum64()>>11) / float64(uint64(1)<<53)
+	return frac < l.sampleRate
+}
+
+// childParent returns the parent span ID for a child span. It prefers the
+// framework-provided parent (e.g. a statement's enclosing transaction span,
+// which velocity sets on QueryExecuted.ParentID inside Manager.Transaction),
+// and otherwise falls back to the enclosing context span (the request or
+// operation span). The child event keeps the unique SpanID minted by NewEvent.
+func childParent(ctxSpanID, frameworkParentID string) string {
+	if frameworkParentID != "" {
+		return frameworkParentID
+	}
+	return ctxSpanID
+}
+
+// msFromDuration converts a time.Duration to fractional milliseconds without
+// flooring, so sub-millisecond operations (a 750µs query) are not reported as
+// 0. Duration.Milliseconds() truncates to whole ms and must not be used for
+// span durations.
+func msFromDuration(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
 }
 
 // HTTP Request Handlers
 
 func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
+	// The request is the ROOT span of its trace: it keeps the context span as
+	// its own SpanID so child events (queries, cache, ...) can parent onto it.
+	// Its ParentID stays whatever the framework provides (nil at the top of a
+	// trace, or the inbound span for a propagated distributed trace).
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if !l.sampleTrace(traceID) {
 		return nil
 	}
 
@@ -196,15 +266,15 @@ func (l *Listeners) onRequestHandled(e *router.RequestHandled) error {
 		e.Method,
 		e.Path,
 		e.StatusCode,
-		float64(e.Duration.Milliseconds()),
+		msFromDuration(e.Duration),
 	)
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if event.TraceID == "" {
-		event.TraceID = GenerateTraceID()
+	if spanID != "" {
+		event.SpanID = spanID
 	}
-	if event.SpanID == "" {
-		event.SpanID = GenerateSpanID()
+	if e.ParentID != "" {
+		parentID := e.ParentID
+		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
 	event.Tags["route"] = e.Route
@@ -231,38 +301,33 @@ func eventTraceIDs(ctx context.Context, traceID, spanID string) (string, string)
 // Database Query Handlers
 
 func (l *Listeners) onQueryExecuted(e *orm.QueryExecuted) error {
-	if !l.shouldSample() {
-		return nil
-	}
-
-	// Extract trace context from the event (populated by Velocity)
+	// A query is a CHILD span: it keeps the unique SpanID from NewEvent and
+	// parents onto the enclosing span. Velocity sets e.SpanID to the enclosing
+	// context span and e.ParentID to the transaction span when the query ran
+	// inside Manager.Transaction; childParent prefers that tx span, else the
+	// context span (the request span).
 	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
-	// Generate trace IDs if not present (for queries outside request context)
-	// This captures queries from model methods that don't pass context
 	if traceID == "" {
+		// Query outside any request/trace context (e.g. a model method that
+		// did not thread ctx). Mint a standalone trace for it.
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewQueryEvent(
 		e.SQL,
-		float64(e.Duration.Milliseconds()),
+		msFromDuration(e.Duration),
 		e.RowsAffected,
 	)
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
-	event.Tags["orphan"] = "true" // Mark as orphan if no parent trace
-	if e.TraceID != "" {
-		delete(event.Tags, "orphan")
+	if e.TraceID == "" {
+		event.Tags["orphan"] = "true" // no enclosing trace context
 	}
 	event.Attributes["connection"] = e.Connection
 	event.Attributes["file"] = e.File
@@ -272,26 +337,51 @@ func (l *Listeners) onQueryExecuted(e *orm.QueryExecuted) error {
 	return nil
 }
 
-// Cache Handlers
-
-func (l *Listeners) onCacheHit(e *cache.CacheHit) error {
-	if !l.shouldSample() {
+// onQueryFailed records a failed database query. Without this, failed queries
+// are completely invisible in the product. It is emitted as a query event (not
+// an exception) so failed queries stay in the query record type alongside
+// successful ones - visible in query listings and counts - while carrying the
+// error and a failed=true marker. The framework provides no duration for a
+// failed query, so duration_ms is 0.
+func (l *Listeners) onQueryFailed(e *orm.QueryFailed) error {
+	traceID := e.TraceID
+	if traceID == "" {
+		traceID = GenerateTraceID()
+	}
+	if !l.sampleTrace(traceID) {
 		return nil
 	}
 
-	// Extract trace context from the event (populated by Velocity)
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
+	event := NewQueryEvent(e.Query, 0, 0)
+	event.TraceID = traceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	if e.TraceID == "" {
+		event.Tags["orphan"] = "true"
+	}
+	event.Attributes["connection"] = e.Connection
+	event.Attributes["failed"] = true
+	event.Attributes["error"] = e.Error
 
-	if traceID == "" {
+	l.collector.Add(event)
+	return nil
+}
+
+// Cache Handlers
+
+func (l *Listeners) onCacheHit(e *cache.CacheHit) error {
+	if e.TraceID == "" {
+		return nil // only record cache ops within a trace
+	}
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
 	event := NewCacheEvent("get", e.Key, true, 0)
-	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -302,23 +392,16 @@ func (l *Listeners) onCacheHit(e *cache.CacheHit) error {
 }
 
 func (l *Listeners) onCacheMiss(e *cache.CacheMiss) error {
-	if !l.shouldSample() {
+	if e.TraceID == "" {
 		return nil
 	}
-
-	// Extract trace context from the event (populated by Velocity)
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
-	if traceID == "" {
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
 	event := NewCacheEvent("get", e.Key, false, 0)
-	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -329,23 +412,16 @@ func (l *Listeners) onCacheMiss(e *cache.CacheMiss) error {
 }
 
 func (l *Listeners) onCacheWritten(e *cache.CacheWritten) error {
-	if !l.shouldSample() {
+	if e.TraceID == "" {
 		return nil
 	}
-
-	// Extract trace context from the event (populated by Velocity)
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
-	if traceID == "" {
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
 	event := NewCacheEvent("set", e.Key, false, 0)
-	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -356,30 +432,69 @@ func (l *Listeners) onCacheWritten(e *cache.CacheWritten) error {
 	return nil
 }
 
-// Queue Job Handlers
-
-func (l *Listeners) onJobQueued(e *queue.JobQueued) error {
-	if !l.shouldSample() {
+// onCacheForgotten records a cache delete. The dashboard's cache "deletes"
+// series keys on operation = 'delete', which was permanently zero until this
+// listener existed.
+func (l *Listeners) onCacheForgotten(e *cache.CacheForgotten) error {
+	if e.TraceID == "" {
+		return nil
+	}
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
-	// Extract trace context
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
+	event := NewCacheEvent("delete", e.Key, false, 0)
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["store"] = e.Store
 
-	// Job queued events may not have trace context if queued outside a request
+	l.collector.Add(event)
+	return nil
+}
+
+// onCacheOperationFailed records a failed cache operation, carrying the
+// framework operation verb (put/forget/flush/...) and the error so cache
+// errors are visible instead of silently swallowed.
+func (l *Listeners) onCacheOperationFailed(e *cache.CacheOperationFailed) error {
+	if e.TraceID == "" {
+		return nil
+	}
+	if !l.sampleTrace(e.TraceID) {
+		return nil
+	}
+
+	event := NewCacheEvent(e.Op, e.Key, false, 0)
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
+		event.ParentID = &parentID
+	}
+	event.Tags["service"] = l.serviceName
+	event.Attributes["store"] = e.Store
+	event.Attributes["failed"] = true
+	event.Attributes["error"] = e.Error
+
+	l.collector.Add(event)
+	return nil
+}
+
+// Queue Job Handlers
+
+func (l *Listeners) onJobQueued(e *queue.JobQueued) error {
+	// Job queued events may not have trace context if queued outside a request.
+	traceID := e.TraceID
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewJobEvent(e.JobType, e.Queue, "queued", 0)
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -400,24 +515,18 @@ func (l *Listeners) onJobProcessing(e *queue.JobProcessing) error {
 
 func (l *Listeners) onJobProcessed(e *queue.JobProcessed) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
-		return nil
-	}
-
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
+	// DurationMs is a framework-floored int64 (whole ms); sub-ms precision is
+	// already lost upstream and cannot be recovered here.
 	event := NewJobEvent(e.JobType, e.Queue, "processed", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(spanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -427,24 +536,16 @@ func (l *Listeners) onJobProcessed(e *queue.JobProcessed) error {
 
 func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
-		return nil
-	}
-
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewJobEvent(e.JobType, e.Queue, "failed", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(spanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -456,25 +557,16 @@ func (l *Listeners) onJobFailed(e *queue.JobFailed) error {
 // HTTP Client Handlers
 
 func (l *Listeners) onHTTPRequestSent(e *httpclient.RequestSent) error {
-	if !l.shouldSample() {
+	if e.TraceID == "" {
+		return nil // Only record requests within a trace
+	}
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
-	if traceID == "" {
-		return nil // Only record requests within a trace
-	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
-	}
-
 	event := NewOutgoingRequestEvent(e.Method, e.URL, e.StatusCode, float64(e.DurationMs))
-	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -486,25 +578,16 @@ func (l *Listeners) onHTTPRequestSent(e *httpclient.RequestSent) error {
 }
 
 func (l *Listeners) onHTTPRequestFailed(e *httpclient.RequestFailed) error {
-	if !l.shouldSample() {
+	if e.TraceID == "" {
+		return nil // Only record requests within a trace
+	}
+	if !l.sampleTrace(e.TraceID) {
 		return nil
 	}
 
-	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
-	if traceID == "" {
-		return nil // Only record requests within a trace
-	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
-	}
-
 	event := NewOutgoingRequestEvent(e.Method, e.URL, 0, float64(e.DurationMs))
-	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	event.TraceID = e.TraceID
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -517,25 +600,17 @@ func (l *Listeners) onHTTPRequestFailed(e *httpclient.RequestFailed) error {
 // Mail Handlers
 
 func (l *Listeners) onMailSent(e *mail.MailSent) error {
-	if !l.shouldSample() {
-		return nil
-	}
-
 	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewMailEvent(e.Subject, len(e.To), e.Channel, "sent", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -545,25 +620,17 @@ func (l *Listeners) onMailSent(e *mail.MailSent) error {
 }
 
 func (l *Listeners) onMailFailed(e *mail.MailFailed) error {
-	if !l.shouldSample() {
-		return nil
-	}
-
 	traceID := e.TraceID
-	spanID := e.SpanID
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewMailEvent(e.Subject, len(e.To), e.Channel, "failed", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(e.SpanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -582,24 +649,16 @@ func (l *Listeners) onScheduledTaskStarting(e *scheduler.ScheduledTaskStarting) 
 
 func (l *Listeners) onScheduledTaskFinished(e *scheduler.ScheduledTaskFinished) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
-		return nil
-	}
-
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewScheduledTaskEvent(e.TaskName, "finished", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(spanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -609,24 +668,16 @@ func (l *Listeners) onScheduledTaskFinished(e *scheduler.ScheduledTaskFinished) 
 
 func (l *Listeners) onScheduledTaskFailed(e *scheduler.ScheduledTaskFailed) error {
 	traceID, spanID := eventTraceIDs(e.Context, e.TraceID, e.SpanID)
-
-	if !l.shouldSample() {
-		return nil
-	}
-
-	parentID := e.ParentID
-
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	if spanID == "" {
-		spanID = GenerateSpanID()
+	if !l.sampleTrace(traceID) {
+		return nil
 	}
 
 	event := NewScheduledTaskEvent(e.TaskName, "failed", float64(e.DurationMs))
 	event.TraceID = traceID
-	event.SpanID = spanID
-	if parentID != "" {
+	if parentID := childParent(spanID, e.ParentID); parentID != "" {
 		event.ParentID = &parentID
 	}
 	event.Tags["service"] = l.serviceName
@@ -649,15 +700,15 @@ func RecordException(ctx context.Context, errType, message, stackTrace string) {
 	event := NewExceptionEvent(errType, message, stackTrace)
 
 	traceID := GetTraceID(ctx)
-	spanID := GetSpanID(ctx)
-
-	if traceID != "" {
-		event.TraceID = traceID
-	} else {
-		event.TraceID = GenerateTraceID()
+	if traceID == "" {
+		traceID = GenerateTraceID()
 	}
-	if spanID != "" {
-		event.SpanID = spanID
+	event.TraceID = traceID
+	// The exception is its own child span under the enclosing operation span;
+	// it keeps the unique SpanID from NewEvent and parents onto the context
+	// span (or the framework parent when set).
+	if parentID := childParent(GetSpanID(ctx), GetParentID(ctx)); parentID != "" {
+		event.ParentID = &parentID
 	}
 	event.Tags["service"] = sdk.config.ServiceName
 

@@ -52,6 +52,20 @@ func NewEvent(eventType string) *Event {
 	}
 }
 
+// backdateToStart moves the event timestamp from emission time (set by
+// NewEvent, which is ≈ the span END because the framework dispatches
+// completion events) back to the span START by subtracting the measured
+// duration. Velwatch's wire contract is that Event.Timestamp is the span
+// start; the OTLP exporter derives end = start + duration from it. A
+// non-positive duration leaves the timestamp at emission, which is correct for
+// point-in-time events (cache ops, exceptions).
+func (e *Event) backdateToStart(durationMs float64) {
+	if durationMs <= 0 {
+		return
+	}
+	e.Timestamp = e.Timestamp.Add(-time.Duration(durationMs * float64(time.Millisecond)))
+}
+
 // NewRequestEvent creates a new HTTP request event
 func NewRequestEvent(method, path string, statusCode int, durationMs float64) *Event {
 	e := NewEvent(EventTypeRequest)
@@ -59,6 +73,7 @@ func NewRequestEvent(method, path string, statusCode int, durationMs float64) *E
 	e.Attributes["path"] = path
 	e.Attributes["status"] = statusCode
 	e.Attributes["duration_ms"] = durationMs
+	e.backdateToStart(durationMs)
 	return e
 }
 
@@ -68,6 +83,7 @@ func NewQueryEvent(query string, durationMs float64, rowCount int64) *Event {
 	e.Attributes["query"] = query
 	e.Attributes["duration_ms"] = durationMs
 	e.Attributes["row_count"] = rowCount
+	e.backdateToStart(durationMs)
 	return e
 }
 
@@ -97,6 +113,7 @@ func NewJobEvent(jobType, queueName, status string, durationMs float64) *Event {
 	e.Attributes["queue"] = queueName
 	e.Attributes["status"] = status
 	e.Attributes["duration_ms"] = durationMs
+	e.backdateToStart(durationMs)
 	return e
 }
 
@@ -107,6 +124,7 @@ func NewOutgoingRequestEvent(method, url string, statusCode int, durationMs floa
 	e.Attributes["url"] = url
 	e.Attributes["status"] = statusCode
 	e.Attributes["duration_ms"] = durationMs
+	e.backdateToStart(durationMs)
 	return e
 }
 
@@ -118,6 +136,7 @@ func NewMailEvent(subject string, recipientCount int, channel, status string, du
 	e.Attributes["channel"] = channel
 	e.Attributes["status"] = status
 	e.Attributes["duration_ms"] = durationMs
+	e.backdateToStart(durationMs)
 	return e
 }
 
@@ -127,6 +146,7 @@ func NewScheduledTaskEvent(taskName, status string, durationMs float64) *Event {
 	e.Attributes["task_name"] = taskName
 	e.Attributes["status"] = status
 	e.Attributes["duration_ms"] = durationMs
+	e.backdateToStart(durationMs)
 	return e
 }
 

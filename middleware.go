@@ -1,6 +1,7 @@
 package velwatch
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"time"
@@ -59,7 +60,7 @@ func Middleware(next http.Handler) http.Handler {
 		spanID := GetSpanID(ctx)
 		parentID := GetParentID(ctx)
 
-		event := NewRequestEvent(r.Method, r.URL.Path, wrapped.statusCode, float64(duration.Milliseconds()))
+		event := NewRequestEvent(r.Method, r.URL.Path, wrapped.statusCode, float64(duration.Microseconds())/1000.0)
 		event.TraceID = traceID
 		event.SpanID = spanID
 		if parentID != "" {
@@ -147,7 +148,7 @@ func (c *InstrumentedHTTPClient) Get(ctx context.Context, url string) (*http.Res
 
 // Post performs an HTTP POST with trace context
 func (c *InstrumentedHTTPClient) Post(ctx context.Context, url, contentType string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
