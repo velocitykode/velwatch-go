@@ -68,8 +68,11 @@ func TestOnJobQueued(t *testing.T) {
 		if event.TraceID != "trace-123" {
 			t.Errorf("TraceID = %q, want %q", event.TraceID, "trace-123")
 		}
-		if event.SpanID != "span-456" {
-			t.Errorf("SpanID = %q, want %q", event.SpanID, "span-456")
+		// The job is a child span: it keeps its own unique span ID (never the
+		// enclosing context span "span-456") and parents onto the
+		// framework-provided parent span.
+		if event.SpanID == "" || event.SpanID == "span-456" {
+			t.Errorf("SpanID = %q, want a unique generated ID distinct from the context span", event.SpanID)
 		}
 		if event.ParentID == nil || *event.ParentID != "parent-789" {
 			t.Errorf("ParentID = %v, want %q", event.ParentID, "parent-789")

@@ -278,9 +278,13 @@ func (sdk *SDK) close() error {
 		}
 		sdk.wg.Wait()
 
-		// Final flush
+		// Final flush, then wait for every in-flight export (including this
+		// last batch) to finish before closing the exporter. Without the
+		// drain, Flush's async export would race the connection teardown and
+		// the final batch would be silently dropped on every SIGTERM/deploy.
 		if sdk.collector != nil {
 			sdk.collector.Flush()
+			sdk.collector.Wait()
 		}
 
 		// Close exporter
